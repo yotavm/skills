@@ -3,9 +3,9 @@ name: create-repo
 description: >
   Use this skill whenever the user wants to create a new GitHub repository using the `gh` CLI.
   Trigger on phrases like "create a repo", "make a new repo", "new github repo", "create a github
-  project", "set up a repo", "init a repo", "create repo in smilify", "new private repo", "spin up
-  a repo", or any variation of creating a GitHub repository. Always use this skill when repo
-  creation is the goal — even if the user doesn't say "gh" or "GitHub" explicitly.
+  project", "set up a repo", "init a repo", "new private repo", "spin up a repo", or any variation
+  of creating a GitHub repository. Always use this skill when repo creation is the goal — even if
+  the user doesn't say "gh" or "GitHub" explicitly.
 ---
 
 # create-repo: Create GitHub Repositories
@@ -27,8 +27,8 @@ flags).
 
 Use `AskUserQuestion` to collect the following (ask all in one call):
 
-1. **Repo name** — what to call the repository (e.g. `my-app`, `summer-backend`)
-2. **Owner** — personal account or `smilify-dev` org
+1. **Repo name** — what to call the repository (e.g. `my-app`, `cool-backend`)
+2. **Owner** — personal account or an org the user belongs to
 3. **Visibility** — public or private
 4. **Description** — optional, short one-liner describing the repo
 5. **Initialize with README?** — yes/no
@@ -52,7 +52,7 @@ gh repo create [OWNER/]REPO_NAME \
 
 **Owner logic:**
 - Personal account: `gh repo create REPO_NAME ...` (no org prefix needed)
-- smilify-dev org: `gh repo create smilify-dev/REPO_NAME ...`
+- Org repo: `gh repo create ORG_NAME/REPO_NAME ...`
 
 **Examples:**
 
@@ -63,7 +63,7 @@ gh repo create my-app --private --add-readme --clone
 
 Org repo, public, with description:
 ```bash
-gh repo create smilify-dev/summer-backend --public --description "Backend API for Summer" --add-readme --clone
+gh repo create my-org/cool-backend --public --description "Backend API for the cool app" --add-readme --clone
 ```
 
 ### Step 3: Confirm and run
@@ -83,7 +83,7 @@ After success, show the user:
   [official docs](https://cli.github.com/)
 - If not authenticated: run `gh auth login` and guide the user through it
 - If the repo name already exists: suggest a different name or ask if they meant to push to it
-- If org permissions are denied: explain they may need to be added to `smilify-dev` org first
+- If org permissions are denied: explain they may need to be added to the org first
 
 ---
 

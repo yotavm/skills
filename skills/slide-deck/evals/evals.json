@@ -11,7 +11,7 @@
     {
       "id": 2,
       "name": "feature-readout",
-      "prompt": "I shipped a feature called 'auto-tagging' that auto-applies labels to incoming Shortcut tickets using LLM classification. Make a 7-slide HTML deck for a 5-minute internal demo readout. Slides: (1) title, (2) the problem (manual triage was slow), (3) how it works as an architecture flow (webhook -> classifier -> Shortcut API), (4) live demo callout, (5) results (3 sample tickets with their auto-applied labels), (6) what's next, (7) wrap. Save as slides.html in the current working directory.",
+      "prompt": "I shipped a feature called 'auto-tagging' that auto-applies labels to incoming support tickets using LLM classification. Make a 7-slide HTML deck for a 5-minute internal demo readout. Slides: (1) title, (2) the problem (manual triage was slow), (3) how it works as an architecture flow (webhook -> classifier -> ticket API), (4) live demo callout, (5) results (3 sample tickets with their auto-applied labels), (6) what's next, (7) wrap. Save as slides.html in the current working directory.",
       "expected_output": "slides.html with 7 slides including a title, problem list, architecture flow, demo callout, and wrap",
       "files": []
     },

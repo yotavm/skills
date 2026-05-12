@@ -14,7 +14,7 @@ That's it. The agent will clone this repo, copy the skill folders into the right
 
 ## Install just one skill
 
-Don't want all four? Paste the URL of the skill you want and ask your agent to install only that one. Each skill folder is a self-contained directory on GitHub, so the URL **is** the install target.
+Don't want all of them? Paste the URL of the skill you want and ask your agent to install only that one. Each skill folder is a self-contained directory on GitHub, so the URL **is** the install target.
 
 > Install the skill at `https://github.com/yotavm/skills/tree/main/skills/slide-deck` for me — download just that folder and put it at `~/.claude/skills/slide-deck/`.
 
@@ -23,7 +23,6 @@ Swap `slide-deck` in the URL for whichever skill you want. Direct links:
 - **slide-deck** → `https://github.com/yotavm/skills/tree/main/skills/slide-deck`
 - **idea** → `https://github.com/yotavm/skills/tree/main/skills/idea`
 - **create-repo** → `https://github.com/yotavm/skills/tree/main/skills/create-repo`
-- **summer-pr-skill** → `https://github.com/yotavm/skills/tree/main/skills/summer-pr-skill`
 
 The agent will fetch only that folder (no need to clone the whole repo).
 
@@ -44,7 +43,7 @@ cp -r /tmp/skills/skills/* ~/.codex/skills/
 Or grab just one skill without cloning the whole repo:
 
 ```bash
-# replace SKILL_NAME with: slide-deck | idea | create-repo | summer-pr-skill
+# replace SKILL_NAME with: slide-deck | idea | create-repo
 SKILL_NAME=slide-deck
 mkdir -p ~/.claude/skills/$SKILL_NAME
 curl -sL "https://github.com/yotavm/skills/archive/refs/heads/main.tar.gz" \
@@ -60,7 +59,6 @@ Restart your agent and the new skills will show up next time you start a thread.
 | **[slide-deck](skills/slide-deck/)** | Generates a polished HTML slide deck using a fixed design system (container-query layout, blue accent palette, prebuilt components). Same aesthetic every time. | "make slides for X", "create a deck", `/slide-deck` |
 | **[idea](skills/idea/)** | Captures ideas as well-formatted markdown files in your personal idea vault. Asks 2 clarifying questions if the idea is sparse. | "idea:", "I want to build X", `/idea` |
 | **[create-repo](skills/create-repo/)** | Creates a new GitHub repo via the `gh` CLI, with sensible defaults for visibility, README init, and clone-after-create. | "make a new repo", "spin up a repo", `/create-repo` |
-| **[summer-pr-skill](skills/summer-pr-skill/)** | Opens pull requests in the Summer monorepo following the team's PR conventions. (Personal-workflow skill — likely only useful if you work at Summer.) | "open a PR", "pr this" |
 
 ## How a skill works
 
