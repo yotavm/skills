@@ -1,23 +1,32 @@
 # skills
 
-A small collection of [Claude Code](https://claude.com/claude-code) skills I actually use day-to-day. Public so anyone can install them and so non-technical folks can hand the URL to Claude and have it set them up.
+A small collection of **agent skills** I actually use day-to-day. These follow the open [Anthropic Skills spec](https://github.com/anthropics/skills), so they work across any AI coding agent that reads it — **Claude Code, Codex CLI, Cursor, Copilot, Gemini CLI, Vercel's agent runtime, and others**. Not just Claude.
 
-## Install (the easy way — works on any machine with Claude Code)
+Public so anyone can install them and so non-technical folks can hand the URL to their agent and have it set them up.
 
-Open Claude Code and paste this:
+## Install (the easy way — works with any compatible agent)
 
-> Install the skills from `https://github.com/yotavm/skills` for me — copy each folder under `skills/` into `~/.claude/skills/`.
+Open your agent (Claude Code, Codex CLI, Cursor, Copilot, etc.) and paste this:
 
-That's it. Claude will git-clone this repo, copy the skill folders into your local `~/.claude/skills/`, and confirm each one is registered. No terminal commands required.
+> Install the skills from `https://github.com/yotavm/skills` for me — copy each folder under `skills/` into my local skills directory (`~/.claude/skills/` for Claude Code, the equivalent location for whichever agent I'm using).
+
+That's it. The agent will clone this repo, copy the skill folders into the right place, and confirm each one is registered. No terminal commands required.
 
 ## Install (the manual way — for people who like terminals)
 
 ```bash
 git clone https://github.com/yotavm/skills.git /tmp/skills
+
+# Claude Code
 cp -r /tmp/skills/skills/* ~/.claude/skills/
+
+# Codex CLI
+cp -r /tmp/skills/skills/* ~/.codex/skills/
+
+# Cursor / other agents — drop into your agent's skills directory
 ```
 
-Restart Claude Code and the new skills will show up next time you start a thread.
+Restart your agent and the new skills will show up next time you start a thread.
 
 ## What's in here
 
@@ -38,7 +47,7 @@ Skills can also bundle:
 - `scripts/` — code the skill runs deterministically
 - `evals/` — test cases used while building the skill
 
-The format follows the [Anthropic skills spec](https://github.com/anthropics/skills). Skills are portable across Claude Code, Codex CLI, and other agents that read the same spec.
+The format follows the [Anthropic skills spec](https://github.com/anthropics/skills), which is the de-facto standard adopted across the agent ecosystem (Claude Code, Codex CLI, Cursor, Copilot, Gemini CLI, Vercel's agent runtime, and others). One skill, every agent.
 
 ## Contributing / forking
 
