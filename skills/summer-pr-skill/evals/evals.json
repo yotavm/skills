@@ -1,0 +1,98 @@
+{
+  "skill_name": "summer-pr-skill",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I'm on branch sc-20032/add-pay-frequency-question in the Summer repo. I just added a new question to the IDR flow that asks about pay frequency (weekly, biweekly, monthly). Open a PR for this.",
+      "expected_output": "A gh pr create command with correct title format (feature(idr): [sc-20032] ...), correct body template with What/Why/How/How to Test sections filled in, _Shortcut:_ line preserved, body passed via heredoc",
+      "assertions": [
+        {
+          "name": "title-format-correct",
+          "description": "Title matches format: type(scope): [sc-NUMBER] Subject"
+        },
+        {
+          "name": "uses-gh-pr-create",
+          "description": "Command uses gh pr create"
+        },
+        {
+          "name": "body-has-all-sections",
+          "description": "PR body contains all four sections: What, Why, How, How to Test"
+        },
+        {
+          "name": "shortcut-line-preserved",
+          "description": "Body starts with _Shortcut:_ (bare, not filled in)"
+        },
+        {
+          "name": "heredoc-used",
+          "description": "Body is passed via heredoc (cat <<'EOF')"
+        },
+        {
+          "name": "ticket-in-title",
+          "description": "Title contains [sc-20032]"
+        },
+        {
+          "name": "subject-under-50-chars",
+          "description": "Subject portion of title is 50 chars or fewer"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "I cleaned up a bunch of dead code in the shared package — removed some old unused utilities and types. No Shortcut ticket for this. Can you open a PR?",
+      "expected_output": "gh pr create with sc-n/a in the title, type chore or refactor, scope shared, body with all four sections",
+      "assertions": [
+        {
+          "name": "uses-sc-na",
+          "description": "Title contains [sc-n/a] since there's no ticket"
+        },
+        {
+          "name": "appropriate-type",
+          "description": "Uses chore or refactor as the type (not feature or fix)"
+        },
+        {
+          "name": "scope-is-shared",
+          "description": "Scope is 'shared'"
+        },
+        {
+          "name": "body-has-all-sections",
+          "description": "PR body contains all four sections: What, Why, How, How to Test"
+        },
+        {
+          "name": "uses-gh-pr-create",
+          "description": "Command uses gh pr create"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "I'm on branch sc-18450/fix-apr-display in the Summer repo. The APR was showing incorrect values on the refi loan summary page — I tracked it down to a rounding bug in the calculation. Create a PR.",
+      "expected_output": "gh pr create with fix type, refi scope, sc-18450, correct body",
+      "assertions": [
+        {
+          "name": "uses-fix-type",
+          "description": "Title uses 'fix' as the type"
+        },
+        {
+          "name": "uses-refi-scope",
+          "description": "Title uses 'refi' as the scope"
+        },
+        {
+          "name": "ticket-in-title",
+          "description": "Title contains [sc-18450]"
+        },
+        {
+          "name": "body-has-all-sections",
+          "description": "PR body contains all four sections: What, Why, How, How to Test"
+        },
+        {
+          "name": "shortcut-line-preserved",
+          "description": "Body starts with _Shortcut:_ (bare)"
+        },
+        {
+          "name": "uses-gh-pr-create",
+          "description": "Command uses gh pr create"
+        }
+      ]
+    }
+  ]
+}

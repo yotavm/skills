@@ -1,0 +1,26 @@
+{
+  "skill_name": "slide-deck",
+  "evals": [
+    {
+      "id": 1,
+      "name": "workshop-deck",
+      "prompt": "Create a 6-slide HTML deck for a 30-minute internal workshop titled 'Writing better commit messages'. Audience: junior engineers. Slides should cover: (1) title, (2) why commit messages matter, (3) the conventional commits format, (4) a good vs bad comparison, (5) a 4-step recipe for writing one, (6) wrap with 'Questions?'. Save the file as slides.html in the current working directory.",
+      "expected_output": "A single self-contained slides.html file with 6 slides matching the established design system",
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "feature-readout",
+      "prompt": "I shipped a feature called 'auto-tagging' that auto-applies labels to incoming Shortcut tickets using LLM classification. Make a 7-slide HTML deck for a 5-minute internal demo readout. Slides: (1) title, (2) the problem (manual triage was slow), (3) how it works as an architecture flow (webhook -> classifier -> Shortcut API), (4) live demo callout, (5) results (3 sample tickets with their auto-applied labels), (6) what's next, (7) wrap. Save as slides.html in the current working directory.",
+      "expected_output": "slides.html with 7 slides including a title, problem list, architecture flow, demo callout, and wrap",
+      "files": []
+    },
+    {
+      "id": 3,
+      "name": "doc-to-slides",
+      "prompt": "Turn this outline into a 5-slide HTML presentation. Save as slides.html in cwd.\n\n# Q2 Engineering Off-site recap\n\n## What we did\n- Half-day on agent infra\n- Half-day on shared design-system migration\n- Lightning talks (4 of them)\n\n## What landed\n- New CI cache layer (30% faster builds)\n- Killed 12 unused npm packages\n- Agreed: TypeScript strict mode by Q3\n\n## What's next\n- Owner assigned to the design-system migration: Maya\n- CI cache rollout to remaining repos by end of May\n- Strict mode pilot on auth package first\n\n## Audience: full eng team, 10 min readout",
+      "expected_output": "slides.html with about 5 slides covering title, what we did, what landed, what's next, wrap",
+      "files": []
+    }
+  ]
+}
