@@ -12,6 +12,21 @@ Open your agent (Claude Code, Codex CLI, Cursor, Copilot, etc.) and paste this:
 
 That's it. The agent will clone this repo, copy the skill folders into the right place, and confirm each one is registered. No terminal commands required.
 
+## Install just one skill
+
+Don't want all four? Paste the URL of the skill you want and ask your agent to install only that one. Each skill folder is a self-contained directory on GitHub, so the URL **is** the install target.
+
+> Install the skill at `https://github.com/yotavm/skills/tree/main/skills/slide-deck` for me — download just that folder and put it at `~/.claude/skills/slide-deck/`.
+
+Swap `slide-deck` in the URL for whichever skill you want. Direct links:
+
+- **slide-deck** → `https://github.com/yotavm/skills/tree/main/skills/slide-deck`
+- **idea** → `https://github.com/yotavm/skills/tree/main/skills/idea`
+- **create-repo** → `https://github.com/yotavm/skills/tree/main/skills/create-repo`
+- **summer-pr-skill** → `https://github.com/yotavm/skills/tree/main/skills/summer-pr-skill`
+
+The agent will fetch only that folder (no need to clone the whole repo).
+
 ## Install (the manual way — for people who like terminals)
 
 ```bash
@@ -24,6 +39,16 @@ cp -r /tmp/skills/skills/* ~/.claude/skills/
 cp -r /tmp/skills/skills/* ~/.codex/skills/
 
 # Cursor / other agents — drop into your agent's skills directory
+```
+
+Or grab just one skill without cloning the whole repo:
+
+```bash
+# replace SKILL_NAME with: slide-deck | idea | create-repo | summer-pr-skill
+SKILL_NAME=slide-deck
+mkdir -p ~/.claude/skills/$SKILL_NAME
+curl -sL "https://github.com/yotavm/skills/archive/refs/heads/main.tar.gz" \
+  | tar -xz -C ~/.claude/skills/$SKILL_NAME --strip=3 "skills-main/skills/$SKILL_NAME"
 ```
 
 Restart your agent and the new skills will show up next time you start a thread.
