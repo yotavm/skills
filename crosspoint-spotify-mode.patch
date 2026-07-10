@@ -1,0 +1,2106 @@
+From 92f8fc631aa2b6fdc59ad5a7db2194f2e3fc8826 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 10 Jul 2026 17:47:17 +0000
+Subject: [PATCH] feat: add Spotify Now Playing mode with album artwork
+
+New home-menu activity that shows dithered album art, track/artist and a
+progress bar for the user's current Spotify playback (Web API observer
+only - no audio).
+
+- lib/Spotify: PKCE auth helpers (host-tested), currently-playing JSON
+  parser using a filtered ArduinoJson document (host-tested), Web API
+  client modeled on KOReaderSyncClient (small TLS buffers + heap guard),
+  SD-card store with device-bound token obfuscation
+- src/network/SpotifyAuthServer: minimal HTTP server for the QR-driven
+  one-time setup and OAuth PKCE login/callback routes; only runs during
+  setup, separate from the file-transfer server
+- src/activities/network/SpotifyActivity: WiFi bring-up via
+  WifiSelectionActivity, 10s/30s adaptive polling, art downloaded once
+  per album and converted to a 1-bit Atkinson-dithered BMP at display
+  size, FAST_REFRESH progress ticks with periodic HALF_REFRESH de-ghost
+- docs/spotify.md + docs/spotify-redirect.html: setup guide and an HTTPS
+  bridge page for Spotify's https-only redirect URI policy
+- 12 new host unit tests (spotify_auth, spotify_parser)
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017CwTd5jjLANup3CKUBJ1BS
+---
+ docs/spotify-redirect.html                    |  34 ++
+ docs/spotify.md                               |  67 +++
+ lib/I18n/translations/english.yaml            |  11 +
+ lib/Spotify/SpotifyAuthUtils.cpp              |  87 ++++
+ lib/Spotify/SpotifyAuthUtils.h                |  41 ++
+ lib/Spotify/SpotifyClient.cpp                 | 266 ++++++++++++
+ lib/Spotify/SpotifyClient.h                   |  73 ++++
+ lib/Spotify/SpotifyNowPlayingParser.cpp       |  65 +++
+ lib/Spotify/SpotifyNowPlayingParser.h         |  30 ++
+ lib/Spotify/SpotifyStore.cpp                  |  33 ++
+ lib/Spotify/SpotifyStore.h                    |  49 +++
+ src/activities/ActivityManager.cpp            |   5 +
+ src/activities/ActivityManager.h              |   3 +-
+ src/activities/home/HomeActivity.cpp          |  11 +-
+ src/activities/home/HomeActivity.h            |   4 +
+ src/activities/network/SpotifyActivity.cpp    | 403 ++++++++++++++++++
+ src/activities/network/SpotifyActivity.h      |  77 ++++
+ src/network/SpotifyAuthServer.cpp             | 182 ++++++++
+ src/network/SpotifyAuthServer.h               |  60 +++
+ src/network/html/SpotifySetupPage.html        |  87 ++++
+ test/CMakeLists.txt                           |   2 +
+ test/spotify_auth/CMakeLists.txt              |  15 +
+ test/spotify_auth/SpotifyAuthUtilsTest.cpp    |  80 ++++
+ test/spotify_parser/CMakeLists.txt            |  24 ++
+ .../SpotifyNowPlayingParserTest.cpp           |  90 ++++
+ 25 files changed, 1795 insertions(+), 4 deletions(-)
+ create mode 100644 docs/spotify-redirect.html
+ create mode 100644 docs/spotify.md
+ create mode 100644 lib/Spotify/SpotifyAuthUtils.cpp
+ create mode 100644 lib/Spotify/SpotifyAuthUtils.h
+ create mode 100644 lib/Spotify/SpotifyClient.cpp
+ create mode 100644 lib/Spotify/SpotifyClient.h
+ create mode 100644 lib/Spotify/SpotifyNowPlayingParser.cpp
+ create mode 100644 lib/Spotify/SpotifyNowPlayingParser.h
+ create mode 100644 lib/Spotify/SpotifyStore.cpp
+ create mode 100644 lib/Spotify/SpotifyStore.h
+ create mode 100644 src/activities/network/SpotifyActivity.cpp
+ create mode 100644 src/activities/network/SpotifyActivity.h
+ create mode 100644 src/network/SpotifyAuthServer.cpp
+ create mode 100644 src/network/SpotifyAuthServer.h
+ create mode 100644 src/network/html/SpotifySetupPage.html
+ create mode 100644 test/spotify_auth/CMakeLists.txt
+ create mode 100644 test/spotify_auth/SpotifyAuthUtilsTest.cpp
+ create mode 100644 test/spotify_parser/CMakeLists.txt
+ create mode 100644 test/spotify_parser/SpotifyNowPlayingParserTest.cpp
+
+diff --git a/docs/spotify-redirect.html b/docs/spotify-redirect.html
+new file mode 100644
+index 0000000..98b84ff
+--- /dev/null
++++ b/docs/spotify-redirect.html
+@@ -0,0 +1,34 @@
++<!DOCTYPE html>
++<html lang="en">
++<head>
++<meta charset="utf-8">
++<meta name="viewport" content="width=device-width, initial-scale=1">
++<title>CrossPoint Spotify Bridge</title>
++</head>
++<body style="font-family:sans-serif;text-align:center;padding-top:3em">
++<h2 id="msg">Forwarding to your CrossPoint&hellip;</h2>
++<p id="detail"></p>
++<script>
++// Spotify requires HTTPS redirect URIs for new apps, but the CrossPoint device
++// only serves plain http on the LAN. Host this page on any HTTPS site (e.g.
++// GitHub Pages), register its URL as the app's Redirect URI, and it forwards
++// the OAuth response to the device. The device's LAN IP rides along in the
++// OAuth `state` parameter as "<csrf>~<ip>" (set by the firmware).
++(function () {
++  var params = new URLSearchParams(location.search);
++  var state = params.get('state') || '';
++  var sep = state.indexOf('~');
++  var ip = sep >= 0 ? state.slice(sep + 1) : '';
++  // Only ever forward to a private LAN address.
++  var lan = /^(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})$/;
++  if (!ip || !lan.test(ip)) {
++    document.getElementById('msg').textContent = 'Could not find your CrossPoint';
++    document.getElementById('detail').textContent =
++      'The link did not include a valid device address. Start the link again from the device.';
++    return;
++  }
++  location.replace('http://' + ip + '/spotify/callback' + location.search);
++})();
++</script>
++</body>
++</html>
+diff --git a/docs/spotify.md b/docs/spotify.md
+new file mode 100644
+index 0000000..25051b0
+--- /dev/null
++++ b/docs/spotify.md
+@@ -0,0 +1,67 @@
++# Spotify "Now Playing" Mode
++
++Shows the album artwork (dithered for e-ink), track title, artists and a
++progress bar for whatever is currently playing on your Spotify account —
++on any device: phone, desktop, smart speaker. The reader only *observes*
++playback via the Spotify Web API; it does not play audio.
++
++Open it from the home menu: **Spotify**.
++
++## One-time setup
++
++You need a (free) Spotify application of your own — the mode talks to the
++Web API with *your* client ID and never shares an app with other users.
++
++1. Go to [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard),
++   create an app (any name), and note its **Client ID**. Select **Web API**;
++   no client secret is needed (the device uses the PKCE flow).
++2. On the reader, open **Spotify** from the home menu and connect to WiFi.
++   The screen shows a QR code — scan it with your phone (same WiFi network).
++3. The setup page opens in your phone browser. Paste the **Client ID**.
++4. Add a **Redirect URI** to your Spotify app (dashboard → app → Settings)
++   and enter the same value on the setup page:
++   - **Device-direct** (try this first): `http://<device-ip>/spotify/callback`
++     — the setup page shows your device's exact address. Spotify has been
++     rejecting plain-http LAN addresses for newly created apps; if the
++     dashboard refuses to save it, use the bridge below.
++   - **HTTPS bridge**: host [`docs/spotify-redirect.html`](spotify-redirect.html)
++     on any HTTPS site you control — the easiest is enabling GitHub Pages on
++     your fork — and register that page's URL as the Redirect URI. The page
++     simply forwards Spotify's response to your device on the LAN (the
++     device's IP travels in the OAuth `state` parameter; the page refuses to
++     forward anywhere but a private LAN address).
++5. Tap **Save & Connect Spotify**, log in and approve. The reader screen
++   switches to Now Playing as soon as the link completes.
++
++The link is stored on the SD card (`/.crosspoint/spotify.json`, token
++obfuscated and device-bound) and survives reboots — after setup the mode
++just needs WiFi. Scopes requested: `user-read-currently-playing`,
++`user-read-playback-state`.
++
++## Using it
++
++- Artwork updates on track change (with a de-ghosting refresh); the progress
++  bar ticks with fast partial refreshes.
++- Polling: every 10s while playing, 30s when idle. **Confirm** forces an
++  immediate refresh; **Back** returns home.
++- Auto-sleep is disabled while the mode is open — it uses WiFi
++  continuously, so expect meaningfully higher battery drain than reading.
++- "Nothing playing" appears when no device is active (or during an ad).
++- To unlink the account: open the setup page (QR shown when the link is
++  broken, or re-run setup) and use **Unlink account**.
++
++## Implementation notes
++
++- `lib/Spotify/` — PKCE helpers (`SpotifyAuthUtils`, host-tested), the Web
++  API client (`SpotifyClient`, modeled on `KOReaderSyncClient`: small TLS
++  buffers + heap guard), the currently-playing JSON parser (filtered
++  ArduinoJson, host-tested) and the SD-card store (`SpotifyStore`).
++- `src/network/SpotifyAuthServer` — tiny HTTP server for the setup page and
++  the OAuth login/callback routes; only runs during setup/link.
++- `src/activities/network/SpotifyActivity` — the mode itself. Album art is
++  downloaded once per album (300px JPEG), converted to a dithered 1-bit BMP
++  at display size via `JpegToBmpConverter`, cached at
++  `/.crosspoint/spotify/art.bmp` and blitted on each render.
++- RAM: the outbound TLS session (~48KB during handshake) never overlaps the
++  JPEG decode; both are guarded by free-heap checks and the response JSON is
++  filtered to under ~1KB.
+diff --git a/lib/I18n/translations/english.yaml b/lib/I18n/translations/english.yaml
+index e636cbe..cf795d4 100644
+--- a/lib/I18n/translations/english.yaml
++++ b/lib/I18n/translations/english.yaml
+@@ -386,3 +386,14 @@ STR_FIRMWARE_WRITE_FAILED: "Firmware write failed"
+ STR_FIRMWARE_UPDATE_DO_NOT_POWER_OFF: "Do not power off!"
+ STR_RECOVERY_MODE: "Recovery Mode"
+ STR_RECOVERY_MODE_HINT: "Place firmware.bin on SD card root and select it"
++
++STR_SPOTIFY: "Spotify"
++STR_SPOTIFY_CONNECTING: "Connecting to Spotify..."
++STR_SPOTIFY_SETUP_HINT: "Scan to set up Spotify"
++STR_SPOTIFY_LINK_HINT: "Scan to link your account"
++STR_SPOTIFY_AUTH_FAILED: "Link failed - scan to try again"
++STR_SPOTIFY_NOTHING_PLAYING: "Nothing playing"
++STR_SPOTIFY_PAUSED: "Paused"
++STR_SPOTIFY_REFRESH: "Refresh"
++STR_SPOTIFY_RETRY_HINT: "Press Confirm to retry"
++STR_SPOTIFY_NO_WIFI: "WiFi connection required"
+diff --git a/lib/Spotify/SpotifyAuthUtils.cpp b/lib/Spotify/SpotifyAuthUtils.cpp
+new file mode 100644
+index 0000000..df8da42
+--- /dev/null
++++ b/lib/Spotify/SpotifyAuthUtils.cpp
+@@ -0,0 +1,87 @@
++#include "SpotifyAuthUtils.h"
++
++namespace {
++constexpr char BASE64URL_ALPHABET[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
++
++bool isUnreserved(const char c) {
++  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' ||
++         c == '.' || c == '~';
++}
++}  // namespace
++
++namespace SpotifyAuthUtils {
++
++std::string base64UrlEncode(const uint8_t* data, const size_t len) {
++  std::string out;
++  out.reserve(((len + 2) / 3) * 4);
++  for (size_t i = 0; i < len; i += 3) {
++    const uint32_t remaining = len - i;
++    const uint32_t b0 = data[i];
++    const uint32_t b1 = remaining > 1 ? data[i + 1] : 0;
++    const uint32_t b2 = remaining > 2 ? data[i + 2] : 0;
++    const uint32_t triple = (b0 << 16) | (b1 << 8) | b2;
++    out += BASE64URL_ALPHABET[(triple >> 18) & 0x3F];
++    out += BASE64URL_ALPHABET[(triple >> 12) & 0x3F];
++    if (remaining > 1) out += BASE64URL_ALPHABET[(triple >> 6) & 0x3F];
++    if (remaining > 2) out += BASE64URL_ALPHABET[triple & 0x3F];
++  }
++  return out;
++}
++
++std::string urlEncode(const std::string& value) {
++  static constexpr char HEX[] = "0123456789ABCDEF";
++  std::string out;
++  out.reserve(value.size() * 3);
++  for (const char c : value) {
++    if (isUnreserved(c)) {
++      out += c;
++    } else {
++      const auto b = static_cast<uint8_t>(c);
++      out += '%';
++      out += HEX[b >> 4];
++      out += HEX[b & 0x0F];
++    }
++  }
++  return out;
++}
++
++std::string buildState(const std::string& csrf, const std::string& deviceIp) { return csrf + "~" + deviceIp; }
++
++bool stateMatches(const std::string& receivedState, const std::string& expectedCsrf) {
++  if (expectedCsrf.empty()) return false;
++  if (receivedState.size() < expectedCsrf.size()) return false;
++  if (receivedState.compare(0, expectedCsrf.size(), expectedCsrf) != 0) return false;
++  // Either exact match or followed by the "~<ip>" bridge suffix.
++  return receivedState.size() == expectedCsrf.size() || receivedState[expectedCsrf.size()] == '~';
++}
++
++std::string buildAuthorizeUrl(const std::string& clientId, const std::string& redirectUri,
++                              const std::string& codeChallenge, const std::string& state) {
++  std::string url = "https://accounts.spotify.com/authorize?response_type=code";
++  url += "&client_id=" + urlEncode(clientId);
++  url += "&scope=" + urlEncode("user-read-currently-playing user-read-playback-state");
++  url += "&redirect_uri=" + urlEncode(redirectUri);
++  url += "&code_challenge_method=S256";
++  url += "&code_challenge=" + codeChallenge;  // base64url is already URL-safe
++  url += "&state=" + urlEncode(state);
++  return url;
++}
++
++std::string buildTokenExchangeBody(const std::string& code, const std::string& redirectUri, const std::string& clientId,
++                                   const std::string& codeVerifier) {
++  std::string body = "grant_type=authorization_code";
++  body += "&code=" + urlEncode(code);
++  body += "&redirect_uri=" + urlEncode(redirectUri);
++  body += "&client_id=" + urlEncode(clientId);
++  body += "&code_verifier=" + codeVerifier;  // base64url is already URL-safe
++  return body;
++}
++
++std::string buildRefreshBody(const std::string& refreshToken, const std::string& clientId) {
++  std::string body = "grant_type=refresh_token";
++  body += "&refresh_token=" + urlEncode(refreshToken);
++  body += "&client_id=" + urlEncode(clientId);
++  return body;
++}
++
++}  // namespace SpotifyAuthUtils
+diff --git a/lib/Spotify/SpotifyAuthUtils.h b/lib/Spotify/SpotifyAuthUtils.h
+new file mode 100644
+index 0000000..608b116
+--- /dev/null
++++ b/lib/Spotify/SpotifyAuthUtils.h
+@@ -0,0 +1,41 @@
++#pragma once
++#include <cstddef>
++#include <cstdint>
++#include <string>
++
++/**
++ * Pure string helpers for the Spotify OAuth 2.0 PKCE flow.
++ *
++ * No Arduino/ESP-IDF dependencies so the logic is host-testable
++ * (see test/spotify_auth). Device-only pieces (SHA-256, RNG) live
++ * in SpotifyClient.
++ */
++namespace SpotifyAuthUtils {
++
++// RFC 4648 base64url without padding (as required for PKCE code challenges).
++std::string base64UrlEncode(const uint8_t* data, size_t len);
++
++// Percent-encode a string for use as a query parameter value.
++std::string urlEncode(const std::string& value);
++
++// State parameter carries a CSRF token plus the device's LAN IP so an
++// HTTPS-hosted bridge page can forward the OAuth redirect back to the
++// device: "<csrf>~<ip>".
++std::string buildState(const std::string& csrf, const std::string& deviceIp);
++
++// Validates that a received state parameter starts with the expected CSRF
++// token (the "~<ip>" suffix is for the bridge page, not for us).
++bool stateMatches(const std::string& receivedState, const std::string& expectedCsrf);
++
++// Full https://accounts.spotify.com/authorize URL for the PKCE flow.
++std::string buildAuthorizeUrl(const std::string& clientId, const std::string& redirectUri,
++                              const std::string& codeChallenge, const std::string& state);
++
++// application/x-www-form-urlencoded body for the authorization-code exchange.
++std::string buildTokenExchangeBody(const std::string& code, const std::string& redirectUri, const std::string& clientId,
++                                   const std::string& codeVerifier);
++
++// application/x-www-form-urlencoded body for an access-token refresh.
++std::string buildRefreshBody(const std::string& refreshToken, const std::string& clientId);
++
++}  // namespace SpotifyAuthUtils
+diff --git a/lib/Spotify/SpotifyClient.cpp b/lib/Spotify/SpotifyClient.cpp
+new file mode 100644
+index 0000000..96999ba
+--- /dev/null
++++ b/lib/Spotify/SpotifyClient.cpp
+@@ -0,0 +1,266 @@
++#include "SpotifyClient.h"
++
++#include <Arduino.h>
++#include <ArduinoJson.h>
++#include <Logging.h>
++#include <esp_crt_bundle.h>
++#include <esp_http_client.h>
++#include <esp_random.h>
++#include <mbedtls/sha256.h>
++
++#include <cstring>
++
++#include "SpotifyAuthUtils.h"
++#include "SpotifyStore.h"
++
++int SpotifyClient::lastHttpCode = 0;
++std::string SpotifyClient::accessToken;
++uint32_t SpotifyClient::accessTokenDeadlineMs = 0;
++
++namespace {
++constexpr char TOKEN_URL[] = "https://accounts.spotify.com/api/token";
++constexpr char NOW_PLAYING_URL[] = "https://api.spotify.com/v1/me/player/currently-playing?additional_types=track";
++
++// Small TLS buffers to fit in ESP32-C3's limited heap (~46KB free after
++// WiFi). The now-playing response is the largest payload (~7KB) and is
++// streamed into the response buffer in chunks, so 2KB I/O buffers suffice.
++constexpr int HTTP_BUF_SIZE = 2048;
++
++// See KOReaderSyncClient: the mbedTLS handshake makes many small allocations
++// totalling ~48KB; check aggregate free heap before starting one.
++constexpr uint32_t MIN_HEAP_FOR_TLS = 55000;
++
++// PKCE code verifier: 48 random bytes -> 64 base64url chars (RFC 7636 allows 43-128).
++constexpr size_t PKCE_RANDOM_BYTES = 48;
++
++struct ResponseBuffer {
++  char* data = nullptr;
++  int len = 0;
++  int capacity = 0;
++
++  ~ResponseBuffer() { free(data); }
++
++  bool ensure(int size) {
++    if (size <= capacity) return true;
++    char* newData = (char*)realloc(data, size);
++    if (!newData) return false;
++    data = newData;
++    capacity = size;
++    return true;
++  }
++};
++
++esp_err_t httpEventHandler(esp_http_client_event_t* evt) {
++  auto* buf = static_cast<ResponseBuffer*>(evt->user_data);
++  if (evt->event_id == HTTP_EVENT_ON_DATA && buf) {
++    if (buf->ensure(buf->len + evt->data_len + 1)) {
++      memcpy(buf->data + buf->len, evt->data, evt->data_len);
++      buf->len += evt->data_len;
++      buf->data[buf->len] = '\0';
++    } else {
++      LOG_ERR("SPOT", "Response buffer allocation failed (%d bytes)", evt->data_len);
++    }
++  }
++  return ESP_OK;
++}
++
++esp_http_client_handle_t createClient(const char* url, ResponseBuffer* buf,
++                                      esp_http_client_method_t method = HTTP_METHOD_GET) {
++  esp_http_client_config_t config = {};
++  config.url = url;
++  config.event_handler = httpEventHandler;
++  config.user_data = buf;
++  config.method = method;
++  config.timeout_ms = 15000;
++  config.buffer_size = HTTP_BUF_SIZE;
++  config.buffer_size_tx = HTTP_BUF_SIZE;
++  config.crt_bundle_attach = esp_crt_bundle_attach;
++  return esp_http_client_init(&config);
++}
++
++bool heapAllowsTls(const char* what) {
++  const uint32_t freeHeap = ESP.getFreeHeap();
++  if (freeHeap < MIN_HEAP_FOR_TLS) {
++    LOG_ERR("SPOT", "Insufficient heap for TLS (%s): %u bytes free (need %u)", what, (unsigned)freeHeap,
++            (unsigned)MIN_HEAP_FOR_TLS);
++    return false;
++  }
++  return true;
++}
++}  // namespace
++
++bool SpotifyClient::generatePkce(std::string& outVerifier, std::string& outChallenge) {
++  uint8_t random[PKCE_RANDOM_BYTES];
++  esp_fill_random(random, sizeof(random));
++  outVerifier = SpotifyAuthUtils::base64UrlEncode(random, sizeof(random));
++
++  uint8_t digest[32];
++  if (mbedtls_sha256(reinterpret_cast<const unsigned char*>(outVerifier.c_str()), outVerifier.size(), digest, 0) != 0) {
++    LOG_ERR("SPOT", "SHA-256 for PKCE challenge failed");
++    return false;
++  }
++  outChallenge = SpotifyAuthUtils::base64UrlEncode(digest, sizeof(digest));
++  return true;
++}
++
++std::string SpotifyClient::generateCsrfToken() {
++  uint8_t random[8];
++  esp_fill_random(random, sizeof(random));
++  char hex[17];
++  for (size_t i = 0; i < sizeof(random); i++) {
++    snprintf(&hex[i * 2], 3, "%02x", random[i]);
++  }
++  return std::string(hex, 16);
++}
++
++SpotifyClient::Error SpotifyClient::tokenRequest(const std::string& body) {
++  lastHttpCode = 0;
++  if (!heapAllowsTls("token")) return LOW_MEMORY;
++
++  ResponseBuffer buf;
++  esp_http_client_handle_t client = createClient(TOKEN_URL, &buf, HTTP_METHOD_POST);
++  if (!client) return NETWORK_ERROR;
++
++  if (esp_http_client_set_header(client, "Content-Type", "application/x-www-form-urlencoded") != ESP_OK ||
++      esp_http_client_set_post_field(client, body.c_str(), body.length()) != ESP_OK) {
++    LOG_ERR("SPOT", "Failed to set token request body");
++    esp_http_client_cleanup(client);
++    return NETWORK_ERROR;
++  }
++
++  const esp_err_t err = esp_http_client_perform(client);
++  const int httpCode = esp_http_client_get_status_code(client);
++  lastHttpCode = httpCode;
++  esp_http_client_cleanup(client);
++
++  LOG_DBG("SPOT", "Token response: %d (err: %d)", httpCode, err);
++
++  if (err != ESP_OK) return NETWORK_ERROR;
++  if (httpCode == 400 || httpCode == 401 || httpCode == 403) return AUTH_FAILED;
++  if (httpCode != 200 || !buf.data) return SERVER_ERROR;
++
++  JsonDocument doc;
++  if (deserializeJson(doc, buf.data)) {
++    LOG_ERR("SPOT", "Token JSON parse failed");
++    return JSON_ERROR;
++  }
++
++  const char* newAccess = doc["access_token"] | "";
++  if (newAccess[0] == '\0') return JSON_ERROR;
++  accessToken = newAccess;
++
++  // Refresh one minute early to avoid racing the expiry on a slow poll.
++  const uint32_t expiresIn = doc["expires_in"] | 3600;
++  accessTokenDeadlineMs = millis() + (expiresIn > 120 ? (expiresIn - 60) : expiresIn / 2) * 1000;
++
++  // Spotify may rotate the refresh token; persist it when it does.
++  const char* newRefresh = doc["refresh_token"] | "";
++  if (newRefresh[0] != '\0' && SPOTIFY_STORE.getRefreshToken() != newRefresh) {
++    SPOTIFY_STORE.setRefreshToken(newRefresh);
++    SPOTIFY_STORE.saveToFile();
++  }
++
++  return OK;
++}
++
++SpotifyClient::Error SpotifyClient::exchangeCode(const std::string& code, const std::string& codeVerifier) {
++  if (!SPOTIFY_STORE.hasClientId()) return NO_CLIENT_ID;
++  const std::string body = SpotifyAuthUtils::buildTokenExchangeBody(code, SPOTIFY_STORE.getRedirectUri(),
++                                                                    SPOTIFY_STORE.getClientId(), codeVerifier);
++  return tokenRequest(body);
++}
++
++SpotifyClient::Error SpotifyClient::refreshAccessToken() {
++  if (!SPOTIFY_STORE.hasClientId()) return NO_CLIENT_ID;
++  if (!SPOTIFY_STORE.isLinked()) return NOT_LINKED;
++  const std::string body =
++      SpotifyAuthUtils::buildRefreshBody(SPOTIFY_STORE.getRefreshToken(), SPOTIFY_STORE.getClientId());
++  const Error result = tokenRequest(body);
++  if (result == AUTH_FAILED) {
++    // Refresh token revoked or invalid: the account must be re-linked.
++    accessToken.clear();
++  }
++  return result;
++}
++
++SpotifyClient::Error SpotifyClient::getNowPlaying(SpotifyNowPlaying& out) {
++  if (!SPOTIFY_STORE.isLinked()) return NOT_LINKED;
++
++  const bool tokenStale = accessToken.empty() || static_cast<int32_t>(millis() - accessTokenDeadlineMs) >= 0;
++  if (tokenStale) {
++    const Error refreshResult = refreshAccessToken();
++    if (refreshResult != OK) return refreshResult;
++  }
++
++  for (int attempt = 0; attempt < 2; attempt++) {
++    lastHttpCode = 0;
++    if (!heapAllowsTls("now-playing")) return LOW_MEMORY;
++
++    ResponseBuffer buf;
++    esp_http_client_handle_t client = createClient(NOW_PLAYING_URL, &buf);
++    if (!client) return NETWORK_ERROR;
++
++    const std::string authHeader = "Bearer " + accessToken;
++    if (esp_http_client_set_header(client, "Authorization", authHeader.c_str()) != ESP_OK) {
++      esp_http_client_cleanup(client);
++      return NETWORK_ERROR;
++    }
++
++    const esp_err_t err = esp_http_client_perform(client);
++    const int httpCode = esp_http_client_get_status_code(client);
++    lastHttpCode = httpCode;
++    esp_http_client_cleanup(client);
++
++    LOG_DBG("SPOT", "Now-playing response: %d (err: %d, %d bytes)", httpCode, err, buf.len);
++
++    if (err != ESP_OK) return NETWORK_ERROR;
++
++    if (httpCode == 200 && buf.data) {
++      if (!SpotifyNowPlayingParser::parse(buf.data, out)) return NOTHING_PLAYING;
++      return OK;
++    }
++    if (httpCode == 204) return NOTHING_PLAYING;
++    if (httpCode == 429) return RATE_LIMITED;
++    if (httpCode == 401 && attempt == 0) {
++      const Error refreshResult = refreshAccessToken();
++      if (refreshResult != OK) return refreshResult;
++      continue;  // retry once with the fresh token
++    }
++    if (httpCode == 401 || httpCode == 403) return AUTH_FAILED;
++    return SERVER_ERROR;
++  }
++
++  return SERVER_ERROR;
++}
++
++void SpotifyClient::resetSession() {
++  accessToken.clear();
++  accessTokenDeadlineMs = 0;
++}
++
++const char* SpotifyClient::errorString(const Error error) {
++  switch (error) {
++    case OK:
++      return "Success";
++    case NO_CLIENT_ID:
++      return "No Spotify client ID configured";
++    case NOT_LINKED:
++      return "Spotify account not linked";
++    case NETWORK_ERROR:
++      return "Network error";
++    case AUTH_FAILED:
++      return "Authorization failed - relink account";
++    case SERVER_ERROR:
++      return "Spotify server error";
++    case JSON_ERROR:
++      return "Response parse error";
++    case NOTHING_PLAYING:
++      return "Nothing playing";
++    case RATE_LIMITED:
++      return "Rate limited - slowing down";
++    case LOW_MEMORY:
++      return "Not enough memory - please retry";
++    default:
++      return "Unknown error";
++  }
++}
+diff --git a/lib/Spotify/SpotifyClient.h b/lib/Spotify/SpotifyClient.h
+new file mode 100644
+index 0000000..c9485c7
+--- /dev/null
++++ b/lib/Spotify/SpotifyClient.h
+@@ -0,0 +1,73 @@
++#pragma once
++#include <string>
++
++#include "SpotifyNowPlayingParser.h"
++
++/**
++ * HTTPS client for the Spotify Web API (OAuth 2.0 PKCE flow).
++ *
++ * Endpoints used:
++ *   POST https://accounts.spotify.com/api/token          - code exchange / refresh
++ *   GET  https://api.spotify.com/v1/me/player/currently-playing
++ *
++ * Modeled on KOReaderSyncClient: per-request esp_http_client with small TLS
++ * buffers and a free-heap guard (the C3 has ~46-50KB free after WiFi and an
++ * mbedTLS handshake consumes ~48KB in aggregate).
++ *
++ * The short-lived access token is kept in RAM only; the refresh token is
++ * persisted via SpotifyStore.
++ */
++class SpotifyClient {
++ public:
++  enum Error {
++    OK = 0,
++    NO_CLIENT_ID,
++    NOT_LINKED,
++    NETWORK_ERROR,
++    AUTH_FAILED,
++    SERVER_ERROR,
++    JSON_ERROR,
++    NOTHING_PLAYING,
++    RATE_LIMITED,
++    LOW_MEMORY,
++  };
++
++  /**
++   * Generate a PKCE code verifier and its S256 challenge.
++   * @return false on RNG/allocation failure
++   */
++  static bool generatePkce(std::string& outVerifier, std::string& outChallenge);
++
++  /** Random hex token for the OAuth `state` CSRF value. */
++  static std::string generateCsrfToken();
++
++  /**
++   * Exchange an authorization code for tokens and persist the refresh token
++   * (SpotifyStore::saveToFile). Uses the store's client ID and redirect URI.
++   */
++  static Error exchangeCode(const std::string& code, const std::string& codeVerifier);
++
++  /** Force-refresh the access token from the stored refresh token. */
++  static Error refreshAccessToken();
++
++  /**
++   * Fetch the currently playing track. Transparently refreshes the access
++   * token when missing/expired and retries once on 401.
++   * @return OK, NOTHING_PLAYING (nothing active / ad break), or an error
++   */
++  static Error getNowPlaying(SpotifyNowPlaying& out);
++
++  /** Drop the in-RAM access token (e.g. after unlinking). */
++  static void resetSession();
++
++  static const char* errorString(Error error);
++
++  /** HTTP status code from the last request (for diagnostics). */
++  static int lastHttpCode;
++
++ private:
++  static Error tokenRequest(const std::string& body);
++
++  static std::string accessToken;
++  static uint32_t accessTokenDeadlineMs;  // millis() timestamp after which the token is stale
++};
+diff --git a/lib/Spotify/SpotifyNowPlayingParser.cpp b/lib/Spotify/SpotifyNowPlayingParser.cpp
+new file mode 100644
+index 0000000..6ddbab2
+--- /dev/null
++++ b/lib/Spotify/SpotifyNowPlayingParser.cpp
+@@ -0,0 +1,65 @@
++#include "SpotifyNowPlayingParser.h"
++
++#include <ArduinoJson.h>
++
++namespace SpotifyNowPlayingParser {
++
++bool parse(const char* json, SpotifyNowPlaying& out) {
++  if (!json || json[0] == '\0') return false;
++
++  JsonDocument filter;
++  filter["is_playing"] = true;
++  filter["progress_ms"] = true;
++  JsonObject item = filter["item"].to<JsonObject>();
++  item["id"] = true;
++  item["name"] = true;
++  item["duration_ms"] = true;
++  item["artists"][0]["name"] = true;
++  JsonObject album = item["album"].to<JsonObject>();
++  album["id"] = true;
++  album["images"][0]["url"] = true;
++  album["images"][0]["width"] = true;
++
++  JsonDocument doc;
++  const DeserializationError err = deserializeJson(doc, json, DeserializationOption::Filter(filter));
++  if (err) return false;
++
++  JsonVariantConst itemVar = doc["item"];
++  if (itemVar.isNull()) return false;  // e.g. ads, or nothing playing
++
++  out.isPlaying = doc["is_playing"] | false;
++  out.progressMs = doc["progress_ms"] | 0;
++  out.trackId = itemVar["id"] | "";
++  out.title = itemVar["name"] | "";
++  out.durationMs = itemVar["duration_ms"] | 0;
++  out.albumId = itemVar["album"]["id"] | "";
++
++  out.artists.clear();
++  for (JsonVariantConst artist : itemVar["artists"].as<JsonArrayConst>()) {
++    const char* name = artist["name"] | "";
++    if (name[0] == '\0') continue;
++    if (!out.artists.empty()) out.artists += ", ";
++    out.artists += name;
++  }
++
++  // Spotify returns images largest-first (typically 640/300/64). Pick the
++  // smallest one that is still >= 300px so the e-ink dither has enough
++  // source resolution without downloading the 640px original.
++  out.artUrl.clear();
++  int bestWidth = 0;
++  for (JsonVariantConst img : itemVar["album"]["images"].as<JsonArrayConst>()) {
++    const char* url = img["url"] | "";
++    const int width = img["width"] | 0;
++    if (url[0] == '\0') continue;
++    const bool better = out.artUrl.empty() || (width >= 300 && (bestWidth < 300 || width < bestWidth)) ||
++                        (width < 300 && bestWidth < 300 && width > bestWidth);
++    if (better) {
++      out.artUrl = url;
++      bestWidth = width;
++    }
++  }
++
++  return !out.trackId.empty();
++}
++
++}  // namespace SpotifyNowPlayingParser
+diff --git a/lib/Spotify/SpotifyNowPlayingParser.h b/lib/Spotify/SpotifyNowPlayingParser.h
+new file mode 100644
+index 0000000..f63e4c7
+--- /dev/null
++++ b/lib/Spotify/SpotifyNowPlayingParser.h
+@@ -0,0 +1,30 @@
++#pragma once
++#include <cstdint>
++#include <string>
++
++/**
++ * The subset of Spotify's "currently playing" response that the UI needs.
++ */
++struct SpotifyNowPlaying {
++  bool isPlaying = false;
++  std::string trackId;
++  std::string title;
++  std::string artists;  // all artist names joined with ", "
++  std::string albumId;
++  std::string artUrl;  // preferred album image (~300px, see parser)
++  uint32_t progressMs = 0;
++  uint32_t durationMs = 0;
++};
++
++namespace SpotifyNowPlayingParser {
++
++/**
++ * Parse the JSON body of GET /v1/me/player/currently-playing into `out`.
++ * Uses an ArduinoJson filter so only the needed fields are materialised
++ * (the full response is ~7KB+; the filtered document stays under ~1KB).
++ *
++ * Returns false on JSON errors or when no track item is present.
++ */
++bool parse(const char* json, SpotifyNowPlaying& out);
++
++}  // namespace SpotifyNowPlayingParser
+diff --git a/lib/Spotify/SpotifyStore.cpp b/lib/Spotify/SpotifyStore.cpp
+new file mode 100644
+index 0000000..6b03cef
+--- /dev/null
++++ b/lib/Spotify/SpotifyStore.cpp
+@@ -0,0 +1,33 @@
++#include "SpotifyStore.h"
++
++#include <Logging.h>
++#include <ObfuscationUtils.h>
++
++void SpotifyStore::toJson(JsonDocument& doc) const {
++  doc["client_id"] = getClientId();
++  doc["redirect_uri"] = getRedirectUri();
++  doc["refresh_token_obf"] = obfuscation::obfuscateToBase64(getRefreshToken());
++}
++
++bool SpotifyStore::fromJson(JsonVariantConst doc) {
++  clientId = doc["client_id"] | "";
++  redirectUri = doc["redirect_uri"] | "";
++
++  bool ok = false;
++  refreshToken = obfuscation::deobfuscateFromBase64(doc["refresh_token_obf"] | "", &ok);
++  if (!ok) {
++    refreshToken.clear();
++  }
++
++  return true;
++}
++
++void SpotifyStore::setConfig(const std::string& id, const std::string& redirect) {
++  clientId = id;
++  redirectUri = redirect;
++  LOG_DBG("SPOT", "Spotify config updated (client id %s)", clientId.empty() ? "cleared" : "set");
++}
++
++void SpotifyStore::setRefreshToken(const std::string& token) { refreshToken = token; }
++
++void SpotifyStore::clearLink() { refreshToken.clear(); }
+diff --git a/lib/Spotify/SpotifyStore.h b/lib/Spotify/SpotifyStore.h
+new file mode 100644
+index 0000000..5a71abb
+--- /dev/null
++++ b/lib/Spotify/SpotifyStore.h
+@@ -0,0 +1,49 @@
++#pragma once
++#include <ArduinoJson.h>
++#include <PersistableStore.h>
++
++#include <string>
++
++/**
++ * Singleton store for the Spotify integration, persisted on the SD card.
++ *
++ * Holds the user's Spotify application client ID, the OAuth redirect URI
++ * registered on that application, and the long-lived refresh token obtained
++ * from the PKCE link flow. The refresh token is XOR-obfuscated with the
++ * device MAC and base64-encoded before writing (same scheme as the other
++ * credential stores — device-bound, not cryptographically secure).
++ *
++ * Access tokens are short-lived and deliberately NOT persisted; they live in
++ * SpotifyClient's RAM only.
++ */
++class SpotifyStore : public PersistableStore<SpotifyStore> {
++ private:
++  std::string clientId;
++  std::string redirectUri;
++  std::string refreshToken;
++
++  SpotifyStore() = default;
++  ~SpotifyStore() = default;
++
++  friend class PersistableStore<SpotifyStore>;
++
++ public:
++  static const char* getFilePath() { return "/.crosspoint/spotify.json"; }
++  void toJson(JsonDocument& doc) const;
++  bool fromJson(JsonVariantConst doc);
++
++  const std::string& getClientId() const { return clientId; }
++  const std::string& getRedirectUri() const { return redirectUri; }
++  const std::string& getRefreshToken() const { return refreshToken; }
++
++  void setConfig(const std::string& id, const std::string& redirect);
++  void setRefreshToken(const std::string& token);
++
++  bool hasClientId() const { return !clientId.empty(); }
++  bool isLinked() const { return !refreshToken.empty() && hasClientId(); }
++
++  // Drop the account link (refresh token) but keep the app configuration.
++  void clearLink();
++};
++
++#define SPOTIFY_STORE SpotifyStore::getInstance()
+diff --git a/src/activities/ActivityManager.cpp b/src/activities/ActivityManager.cpp
+index 7757d05..1b80fae 100644
+--- a/src/activities/ActivityManager.cpp
++++ b/src/activities/ActivityManager.cpp
+@@ -14,6 +14,7 @@
+ #include "home/HomeActivity.h"
+ #include "home/RecentBooksActivity.h"
+ #include "network/CrossPointWebServerActivity.h"
++#include "network/SpotifyActivity.h"
+ #include "reader/ReaderActivity.h"
+ #include "settings/OpdsServerListActivity.h"
+ #include "settings/SettingsActivity.h"
+@@ -175,6 +176,8 @@ void ActivityManager::goToFileTransfer() {
+   replaceActivity(std::make_unique<CrossPointWebServerActivity>(renderer, mappedInput));
+ }
+ 
++void ActivityManager::goToSpotify() { replaceActivity(std::make_unique<SpotifyActivity>(renderer, mappedInput)); }
++
+ void ActivityManager::goToSettings() { replaceActivity(std::make_unique<SettingsActivity>(renderer, mappedInput)); }
+ 
+ void ActivityManager::goToFileBrowser(std::string path) {
+@@ -221,6 +224,8 @@ void ActivityManager::goHome(HomeMenuItem initialMenuItem) {
+       initialMenuItem = HomeMenuItem::OPDS_BROWSER;
+     } else if (activityName == "CrossPointWebServer") {
+       initialMenuItem = HomeMenuItem::FILE_TRANSFER;
++    } else if (activityName == "Spotify") {
++      initialMenuItem = HomeMenuItem::SPOTIFY;
+     } else if (activityName == "Settings") {
+       initialMenuItem = HomeMenuItem::SETTINGS_MENU;
+     }
+diff --git a/src/activities/ActivityManager.h b/src/activities/ActivityManager.h
+index 5712ec7..294c073 100644
+--- a/src/activities/ActivityManager.h
++++ b/src/activities/ActivityManager.h
+@@ -17,7 +17,7 @@
+ class Activity;    // forward declaration
+ class RenderLock;  // forward declaration
+ 
+-enum class HomeMenuItem { NONE, FILE_BROWSER, RECENTS, OPDS_BROWSER, FILE_TRANSFER, SETTINGS_MENU };
++enum class HomeMenuItem { NONE, FILE_BROWSER, RECENTS, OPDS_BROWSER, FILE_TRANSFER, SPOTIFY, SETTINGS_MENU };
+ 
+ /**
+  * ActivityManager
+@@ -82,6 +82,7 @@ class ActivityManager {
+ 
+   // goTo... functions are convenient wrapper for replaceActivity()
+   void goToFileTransfer();
++  void goToSpotify();
+   void goToSettings();
+   void goToFileBrowser(std::string path = {});
+   void goToRecentBooks();
+diff --git a/src/activities/home/HomeActivity.cpp b/src/activities/home/HomeActivity.cpp
+index 2874326..a3f7408 100644
+--- a/src/activities/home/HomeActivity.cpp
++++ b/src/activities/home/HomeActivity.cpp
+@@ -21,7 +21,7 @@
+ #include "fontIds.h"
+ 
+ int HomeActivity::getMenuItemCount() const {
+-  int count = 4;  // File Browser, Recents, File transfer, Settings
++  int count = 5;  // File Browser, Recents, File transfer, Spotify, Settings
+   if (!recentBooks.empty()) {
+     count += recentBooks.size();
+   }
+@@ -197,6 +197,9 @@ void HomeActivity::loop() {
+         case HomeMenuItem::FILE_TRANSFER:
+           onFileTransferOpen();
+           break;
++        case HomeMenuItem::SPOTIFY:
++          onSpotifyOpen();
++          break;
+         case HomeMenuItem::SETTINGS_MENU:
+           onSettingsOpen();
+           break;
+@@ -232,8 +235,8 @@ void HomeActivity::render(RenderLock&&) {
+ 
+   // Build menu items dynamically
+   std::vector<const char*> menuItems = {tr(STR_BROWSE_FILES), tr(STR_MENU_RECENT_BOOKS), tr(STR_FILE_TRANSFER),
+-                                        tr(STR_SETTINGS_TITLE)};
+-  std::vector<UIIcon> menuIcons = {Folder, Recent, Transfer, Settings};
++                                        tr(STR_SPOTIFY), tr(STR_SETTINGS_TITLE)};
++  std::vector<UIIcon> menuIcons = {Folder, Recent, Transfer, Image, Settings};
+ 
+   if (hasOpdsServers) {
+     menuItems.insert(menuItems.begin() + 2, tr(STR_OPDS_BROWSER));
+@@ -280,4 +283,6 @@ void HomeActivity::onSettingsOpen() { activityManager.goToSettings(); }
+ 
+ void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
+ 
++void HomeActivity::onSpotifyOpen() { activityManager.goToSpotify(); }
++
+ void HomeActivity::onOpdsBrowserOpen() { activityManager.goToBrowser(); }
+diff --git a/src/activities/home/HomeActivity.h b/src/activities/home/HomeActivity.h
+index 6d170cd..bca27c5 100644
+--- a/src/activities/home/HomeActivity.h
++++ b/src/activities/home/HomeActivity.h
+@@ -41,6 +41,8 @@ class HomeActivity final : public Activity {
+     if (hasOpdsUrl) ++i;
+     if (item == HomeMenuItem::FILE_TRANSFER) return i;
+     ++i;
++    if (item == HomeMenuItem::SPOTIFY) return i;
++    ++i;
+     if (item == HomeMenuItem::SETTINGS_MENU) return i;
+     return 0;
+   }
+@@ -52,6 +54,7 @@ class HomeActivity final : public Activity {
+     if (idx == i++) return HomeMenuItem::RECENTS;
+     if (hasOpdsUrl && idx == i++) return HomeMenuItem::OPDS_BROWSER;
+     if (idx == i++) return HomeMenuItem::FILE_TRANSFER;
++    if (idx == i++) return HomeMenuItem::SPOTIFY;
+     if (idx == i) return HomeMenuItem::SETTINGS_MENU;
+     return HomeMenuItem::NONE;
+   }
+@@ -60,6 +63,7 @@ class HomeActivity final : public Activity {
+   void onRecentsOpen();
+   void onSettingsOpen();
+   void onFileTransferOpen();
++  void onSpotifyOpen();
+   void onOpdsBrowserOpen();
+ 
+   int getMenuItemCount() const;
+diff --git a/src/activities/network/SpotifyActivity.cpp b/src/activities/network/SpotifyActivity.cpp
+new file mode 100644
+index 0000000..5edb6e1
+--- /dev/null
++++ b/src/activities/network/SpotifyActivity.cpp
+@@ -0,0 +1,403 @@
++#include "SpotifyActivity.h"
++
++#include <Bitmap.h>
++#include <GfxRenderer.h>
++#include <HalStorage.h>
++#include <I18n.h>
++#include <JpegToBmpConverter.h>
++#include <Logging.h>
++#include <Memory.h>
++#include <SpotifyClient.h>
++#include <SpotifyStore.h>
++#include <WiFi.h>
++
++#include "SilentRestart.h"
++#include "activities/network/WifiSelectionActivity.h"
++#include "components/UITheme.h"
++#include "fontIds.h"
++#include "network/HttpDownloader.h"
++#include "network/SpotifyAuthServer.h"
++#include "util/QrUtils.h"
++
++namespace {
++constexpr char CACHE_DIR[] = "/.crosspoint/spotify";
++constexpr char ART_JPG_PATH[] = "/.crosspoint/spotify/art.jpg";
++constexpr char ART_BMP_PATH[] = "/.crosspoint/spotify/art.bmp";
++
++// Artwork square rendered on screen; the 300px Spotify image is upscaled
++// slightly during the BMP conversion so dithering happens at output size.
++constexpr int ART_SIZE = 360;
++
++constexpr uint32_t POLL_MS_PLAYING = 10000;
++constexpr uint32_t POLL_MS_IDLE = 30000;
++constexpr uint32_t POLL_MS_RATE_LIMITED = 60000;
++
++// De-ghost with a HALF_REFRESH after this many FAST_REFRESH paints.
++constexpr int FAST_REFRESHES_BEFORE_CLEAN = 8;
++
++// Downloading art needs a TLS session; skip artwork (keep text) when the
++// heap could not take the handshake. Same rationale as SpotifyClient.
++constexpr uint32_t MIN_HEAP_FOR_ART_DOWNLOAD = 60000;
++
++void formatMs(char* out, const size_t outSize, const uint32_t ms) {
++  const uint32_t totalSec = ms / 1000;
++  snprintf(out, outSize, "%u:%02u", (unsigned)(totalSec / 60), (unsigned)(totalSec % 60));
++}
++}  // namespace
++
++void SpotifyActivity::onEnter() {
++  Activity::onEnter();
++  SPOTIFY_STORE.loadFromFile();
++
++  if (WiFi.status() == WL_CONNECTED) {
++    enterSetupOrPolling();
++    return;
++  }
++
++  shouldTearDownWifiOnExit = true;
++  startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput),
++                         [this](const ActivityResult& result) { onWifiSelectionComplete(!result.isCancelled); });
++}
++
++void SpotifyActivity::onExit() {
++  stopAuthServer();
++  Activity::onExit();
++
++  if (shouldTearDownWifiOnExit && WiFi.getMode() != WIFI_MODE_NULL) {
++    WiFi.disconnect(false);
++    delay(30);
++    silentRestart();
++  }
++}
++
++void SpotifyActivity::onWifiSelectionComplete(const bool connected) {
++  if (!connected) {
++    LOG_INF("SPOT", "WiFi selection cancelled, leaving Spotify mode");
++    onGoHome(HomeMenuItem::SPOTIFY);
++    return;
++  }
++  enterSetupOrPolling();
++}
++
++void SpotifyActivity::enterSetupOrPolling() {
++  if (SPOTIFY_STORE.isLinked()) {
++    state = State::POLL_FIRST;
++  } else if (startAuthServer()) {
++    state = State::SETUP;
++  } else {
++    fail(tr(STR_SPOTIFY_NO_WIFI));
++    return;
++  }
++  requestUpdate();
++}
++
++bool SpotifyActivity::startAuthServer() {
++  if (!authServer) {
++    authServer = makeUniqueNoThrow<SpotifyAuthServer>();
++    if (!authServer) {
++      LOG_ERR("SPOT", "OOM: SpotifyAuthServer");
++      return false;
++    }
++  }
++  return authServer->begin();
++}
++
++void SpotifyActivity::stopAuthServer() {
++  if (authServer) {
++    authServer->stop();
++  }
++}
++
++bool SpotifyActivity::skipLoopDelay() { return authServer && authServer->isRunning(); }
++
++void SpotifyActivity::loop() {
++  switch (state) {
++    case State::WIFI_WAIT:
++      return;
++
++    case State::SETUP: {
++      authServer->handleClient();
++      if (authServer->consumeConfigChanged()) {
++        requestUpdate();  // client ID arrived: switch the QR to the login URL
++      }
++      if (authServer->getLinkResult() == SpotifyAuthServer::LinkResult::FAILED && !linkFailureRendered) {
++        linkFailureRendered = true;
++        requestUpdate();
++      }
++      if (authServer->getLinkResult() == SpotifyAuthServer::LinkResult::SUCCESS) {
++        stopAuthServer();
++        state = State::POLL_FIRST;
++        requestUpdate();
++        return;
++      }
++      if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
++        onGoHome(HomeMenuItem::SPOTIFY);
++      }
++      return;
++    }
++
++    case State::POLL_FIRST:
++      // Paint the "connecting" screen before the blocking network calls.
++      requestUpdateAndWait();
++      pollNowPlaying();
++      return;
++
++    case State::NOW_PLAYING: {
++      if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
++        onGoHome(HomeMenuItem::SPOTIFY);
++        return;
++      }
++      const bool forcePoll = mappedInput.wasReleased(MappedInputManager::Button::Confirm);
++      if (forcePoll || millis() - lastPollMs >= pollIntervalMs) {
++        pollNowPlaying();
++      }
++      return;
++    }
++
++    case State::SHOW_ERROR:
++      if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
++        onGoHome(HomeMenuItem::SPOTIFY);
++        return;
++      }
++      if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
++        state = SPOTIFY_STORE.isLinked() ? State::POLL_FIRST : State::WIFI_WAIT;
++        if (state == State::WIFI_WAIT) enterSetupOrPolling();
++        requestUpdate();
++      }
++      return;
++  }
++}
++
++void SpotifyActivity::pollNowPlaying() {
++  SpotifyNowPlaying fresh;
++  const SpotifyClient::Error err = SpotifyClient::getNowPlaying(fresh);
++  lastPollMs = millis();
++
++  switch (err) {
++    case SpotifyClient::OK: {
++      const bool trackChanged = !hasTrack || fresh.trackId != nowPlaying.trackId;
++      nowPlaying = fresh;
++      hasTrack = true;
++      lastFetchMs = millis();
++      pollIntervalMs = nowPlaying.isPlaying ? POLL_MS_PLAYING : POLL_MS_IDLE;
++      if (nowPlaying.albumId != lastAlbumId) {
++        updateAlbumArt();
++      }
++      if (trackChanged) wantHalfRefresh = true;
++      state = State::NOW_PLAYING;
++      requestUpdate();
++      return;
++    }
++
++    case SpotifyClient::NOTHING_PLAYING:
++      if (hasTrack) wantHalfRefresh = true;
++      hasTrack = false;
++      pollIntervalMs = POLL_MS_IDLE;
++      state = State::NOW_PLAYING;
++      requestUpdate();
++      return;
++
++    case SpotifyClient::RATE_LIMITED:
++      pollIntervalMs = POLL_MS_RATE_LIMITED;
++      state = State::NOW_PLAYING;
++      return;
++
++    case SpotifyClient::NOT_LINKED:
++    case SpotifyClient::NO_CLIENT_ID:
++    case SpotifyClient::AUTH_FAILED:
++      // Token revoked or config wiped: go back through the link flow.
++      LOG_ERR("SPOT", "Re-link needed: %s", SpotifyClient::errorString(err));
++      SpotifyClient::resetSession();
++      if (startAuthServer()) {
++        state = State::SETUP;
++        requestUpdate();
++      } else {
++        fail(SpotifyClient::errorString(err));
++      }
++      return;
++
++    default:
++      fail(SpotifyClient::errorString(err));
++      return;
++  }
++}
++
++void SpotifyActivity::updateAlbumArt() {
++  artBmpPath.clear();
++  lastAlbumId = nowPlaying.albumId;
++  if (nowPlaying.artUrl.empty()) return;
++
++  if (ESP.getFreeHeap() < MIN_HEAP_FOR_ART_DOWNLOAD) {
++    LOG_ERR("SPOT", "Skipping art download, heap too low (%u)", (unsigned)ESP.getFreeHeap());
++    return;
++  }
++
++  if (!Storage.ensureDirectoryExists(CACHE_DIR)) {
++    LOG_ERR("SPOT", "Cannot create %s", CACHE_DIR);
++    return;
++  }
++
++  if (HttpDownloader::downloadToFile(nowPlaying.artUrl, ART_JPG_PATH) != HttpDownloader::OK) {
++    LOG_ERR("SPOT", "Album art download failed");
++    return;
++  }
++
++  bool converted = false;
++  {
++    HalFile jpegFile;
++    HalFile bmpFile;
++    if (Storage.openFileForRead("SPOT", ART_JPG_PATH, jpegFile) &&
++        Storage.openFileForWrite("SPOT", ART_BMP_PATH, bmpFile)) {
++      converted = JpegToBmpConverter::jpegFileTo1BitBmpStreamWithSize(jpegFile, bmpFile, ART_SIZE, ART_SIZE);
++    }
++    // HalFile destructors close both files here (DESTRUCTOR_CLOSES_FILE).
++  }
++  Storage.remove(ART_JPG_PATH);
++
++  if (!converted) {
++    LOG_ERR("SPOT", "Album art conversion failed");
++    Storage.remove(ART_BMP_PATH);
++    return;
++  }
++  artBmpPath = ART_BMP_PATH;
++}
++
++void SpotifyActivity::fail(const char* message) {
++  snprintf(errorMessage, sizeof(errorMessage), "%s", message);
++  state = State::SHOW_ERROR;
++  requestUpdate();
++}
++
++void SpotifyActivity::render(RenderLock&&) {
++  renderer.clearScreen();
++
++  const auto& metrics = UITheme::getInstance().getMetrics();
++  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, renderer.getScreenWidth(), metrics.headerHeight},
++                 tr(STR_SPOTIFY));
++
++  switch (state) {
++    case State::WIFI_WAIT:
++      renderMessage(tr(STR_SPOTIFY_CONNECTING), nullptr);
++      break;
++    case State::SETUP:
++      renderSetup();
++      break;
++    case State::POLL_FIRST:
++      renderMessage(tr(STR_SPOTIFY_CONNECTING), nullptr);
++      break;
++    case State::NOW_PLAYING:
++      renderNowPlaying();
++      return;  // renderNowPlaying picks its own refresh mode
++    case State::SHOW_ERROR:
++      renderMessage(errorMessage, tr(STR_SPOTIFY_RETRY_HINT));
++      drawBottomHints();
++      break;
++  }
++
++  renderer.displayBuffer();
++}
++
++void SpotifyActivity::renderSetup() const {
++  const int pageWidth = renderer.getScreenWidth();
++  const bool needsConfig = !SPOTIFY_STORE.hasClientId();
++
++  const std::string url = needsConfig ? authServer->getBaseUrl() : authServer->getBaseUrl() + "spotify/login";
++  const char* hint = needsConfig ? tr(STR_SPOTIFY_SETUP_HINT) : tr(STR_SPOTIFY_LINK_HINT);
++
++  renderer.drawCenteredText(UI_12_FONT_ID, 130, hint, true, EpdFontFamily::BOLD);
++
++  constexpr int QR_SIZE = 280;
++  QrUtils::drawQrCode(renderer, Rect{(pageWidth - QR_SIZE) / 2, 180, QR_SIZE, QR_SIZE}, url);
++
++  renderer.drawCenteredText(UI_10_FONT_ID, 180 + QR_SIZE + 40,
++                            renderer.truncatedText(UI_10_FONT_ID, url.c_str(), pageWidth - 40).c_str());
++
++  if (authServer->getLinkResult() == SpotifyAuthServer::LinkResult::FAILED) {
++    renderer.drawCenteredText(UI_10_FONT_ID, 180 + QR_SIZE + 80, tr(STR_SPOTIFY_AUTH_FAILED));
++  }
++
++  const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
++  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
++}
++
++void SpotifyActivity::renderNowPlaying() {
++  const int pageWidth = renderer.getScreenWidth();
++
++  if (!hasTrack) {
++    renderMessage(tr(STR_SPOTIFY_NOTHING_PLAYING), nullptr);
++    drawBottomHints();
++  } else {
++    const int artTop = 80;
++    bool artDrawn = false;
++    if (!artBmpPath.empty()) {
++      HalFile file;
++      if (Storage.openFileForRead("SPOT", artBmpPath, file)) {
++        Bitmap bmp(file);
++        if (bmp.parseHeaders() == BmpReaderError::Ok) {
++          renderer.drawBitmap1Bit(bmp, (pageWidth - bmp.getWidth()) / 2, artTop + (ART_SIZE - bmp.getHeight()) / 2,
++                                  ART_SIZE, ART_SIZE);
++          artDrawn = true;
++        }
++      }
++    }
++    if (!artDrawn) {
++      // Placeholder frame where the artwork would be.
++      renderer.drawRect((pageWidth - ART_SIZE) / 2, artTop, ART_SIZE, ART_SIZE, true);
++    }
++
++    const int textTop = artTop + ART_SIZE + 50;
++    renderer.drawCenteredText(
++        UI_12_FONT_ID, textTop,
++        renderer.truncatedText(UI_12_FONT_ID, nowPlaying.title.c_str(), pageWidth - 40, EpdFontFamily::BOLD).c_str(),
++        true, EpdFontFamily::BOLD);
++    renderer.drawCenteredText(
++        UI_10_FONT_ID, textTop + 40,
++        renderer.truncatedText(UI_10_FONT_ID, nowPlaying.artists.c_str(), pageWidth - 40).c_str());
++
++    // Estimate the live position from the last poll timestamp.
++    uint32_t elapsed = nowPlaying.progressMs;
++    if (nowPlaying.isPlaying) elapsed += millis() - lastFetchMs;
++    if (nowPlaying.durationMs > 0 && elapsed > nowPlaying.durationMs) elapsed = nowPlaying.durationMs;
++
++    const auto& metrics = UITheme::getInstance().getMetrics();
++    const int barY = textTop + 90;
++    GUI.drawProgressBar(renderer, Rect{40, barY, pageWidth - 80, metrics.progressBarHeight}, elapsed,
++                        nowPlaying.durationMs > 0 ? nowPlaying.durationMs : 1);
++
++    char elapsedStr[8];
++    char durationStr[8];
++    char timeLine[32];
++    formatMs(elapsedStr, sizeof(elapsedStr), elapsed);
++    formatMs(durationStr, sizeof(durationStr), nowPlaying.durationMs);
++    if (nowPlaying.isPlaying) {
++      snprintf(timeLine, sizeof(timeLine), "%s / %s", elapsedStr, durationStr);
++    } else {
++      snprintf(timeLine, sizeof(timeLine), "%s / %s  -  %s", elapsedStr, durationStr, tr(STR_SPOTIFY_PAUSED));
++    }
++    renderer.drawCenteredText(UI_10_FONT_ID, barY + metrics.progressBarHeight + 26, timeLine);
++
++    drawBottomHints();
++  }
++
++  HalDisplay::RefreshMode mode = HalDisplay::FAST_REFRESH;
++  fastRefreshCount++;
++  if (wantHalfRefresh || fastRefreshCount >= FAST_REFRESHES_BEFORE_CLEAN) {
++    mode = HalDisplay::HALF_REFRESH;
++    wantHalfRefresh = false;
++    fastRefreshCount = 0;
++  }
++  renderer.displayBuffer(mode);
++}
++
++void SpotifyActivity::renderMessage(const char* line1, const char* line2) const {
++  const int midY = renderer.getScreenHeight() / 2;
++  renderer.drawCenteredText(UI_12_FONT_ID, midY - 20, line1, true, EpdFontFamily::BOLD);
++  if (line2 && line2[0] != '\0') {
++    renderer.drawCenteredText(UI_10_FONT_ID, midY + 15, line2);
++  }
++}
++
++void SpotifyActivity::drawBottomHints() const {
++  const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SPOTIFY_REFRESH), "", "");
++  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
++}
+diff --git a/src/activities/network/SpotifyActivity.h b/src/activities/network/SpotifyActivity.h
+new file mode 100644
+index 0000000..464e338
+--- /dev/null
++++ b/src/activities/network/SpotifyActivity.h
+@@ -0,0 +1,77 @@
++#pragma once
++
++#include <SpotifyNowPlayingParser.h>
++
++#include <memory>
++#include <string>
++
++#include "activities/Activity.h"
++
++class SpotifyAuthServer;
++
++/**
++ * Spotify "Now Playing" mode: shows dithered album artwork, track/artist and
++ * a progress bar for whatever is playing on the user's Spotify account.
++ *
++ * First run walks through a QR-driven setup (client ID + OAuth PKCE link)
++ * served by a small on-device web server; after that the activity polls the
++ * Web API and only needs WiFi.
++ *
++ * E-ink strategy: FAST_REFRESH for progress ticks, HALF_REFRESH on track
++ * changes and periodically to clear ghosting. Artwork is downloaded once per
++ * album, converted to a dithered 1-bit BMP and cached on the SD card.
++ */
++class SpotifyActivity final : public Activity {
++ public:
++  explicit SpotifyActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
++      : Activity("Spotify", renderer, mappedInput) {}
++
++  void onEnter() override;
++  void onExit() override;
++  void loop() override;
++  void render(RenderLock&&) override;
++
++  // Keep the loop snappy while serving the setup pages; relax to the normal
++  // 10ms cadence while polling.
++  bool skipLoopDelay() override;
++  // A now-playing screen must not fall asleep mid-album.
++  bool preventAutoSleep() override { return true; }
++
++ private:
++  enum class State {
++    WIFI_WAIT,    // WifiSelectionActivity in front
++    SETUP,        // auth server running, waiting for config/link via phone
++    POLL_FIRST,   // linked; render "connecting" then do the first poll
++    NOW_PLAYING,  // steady state: poll on a timer
++    SHOW_ERROR,
++  };
++
++  void onWifiSelectionComplete(bool connected);
++  void enterSetupOrPolling();
++  bool startAuthServer();
++  void stopAuthServer();
++  void pollNowPlaying();
++  void updateAlbumArt();
++  void fail(const char* message);
++
++  void renderSetup() const;
++  void renderNowPlaying();
++  void renderMessage(const char* line1, const char* line2) const;
++  void drawBottomHints() const;
++
++  State state = State::WIFI_WAIT;
++  bool shouldTearDownWifiOnExit = false;
++  std::unique_ptr<SpotifyAuthServer> authServer;
++
++  SpotifyNowPlaying nowPlaying;
++  bool hasTrack = false;
++  std::string artBmpPath;       // dithered 1-bit BMP of the current album art ("" = none)
++  std::string lastAlbumId;      // album of the art currently cached/rendered
++  uint32_t lastPollMs = 0;      // millis() of the last completed poll
++  uint32_t lastFetchMs = 0;     // millis() when nowPlaying.progressMs was sampled
++  uint32_t pollIntervalMs = 0;  // 0 = poll immediately
++  int fastRefreshCount = 0;
++  bool wantHalfRefresh = false;
++  bool linkFailureRendered = false;
++  char errorMessage[96] = {0};
++};
+diff --git a/src/network/SpotifyAuthServer.cpp b/src/network/SpotifyAuthServer.cpp
+new file mode 100644
+index 0000000..35be7bb
+--- /dev/null
++++ b/src/network/SpotifyAuthServer.cpp
+@@ -0,0 +1,182 @@
++#include "SpotifyAuthServer.h"
++
++#include <ArduinoJson.h>
++#include <Logging.h>
++#include <SpotifyAuthUtils.h>
++#include <SpotifyClient.h>
++#include <SpotifyStore.h>
++#include <WebServer.h>
++#include <WiFi.h>
++
++#include "html/SpotifySetupPageHtml.generated.h"
++
++namespace {
++constexpr int HTTP_PORT = 80;
++
++// Small self-contained result pages; the phone browser lands here at the end
++// of the OAuth redirect chain, so keep them dependency-free.
++constexpr char LINKED_PAGE[] =
++    "<html><body style='font-family:sans-serif;text-align:center;padding-top:3em'>"
++    "<h2>&#10003; Spotify linked</h2><p>You can close this page. Check your CrossPoint screen.</p></body></html>";
++constexpr char FAILED_PAGE_PREFIX[] =
++    "<html><body style='font-family:sans-serif;text-align:center;padding-top:3em'>"
++    "<h2>Spotify link failed</h2><p>";
++constexpr char FAILED_PAGE_SUFFIX[] = "</p><p><a href='/spotify/login'>Try again</a></p></body></html>";
++}  // namespace
++
++SpotifyAuthServer::SpotifyAuthServer() = default;
++SpotifyAuthServer::~SpotifyAuthServer() { stop(); }
++
++bool SpotifyAuthServer::begin() {
++  if (running) return true;
++  if (WiFi.status() != WL_CONNECTED) {
++    LOG_ERR("SPOT", "Cannot start Spotify auth server without WiFi");
++    return false;
++  }
++
++  server.reset(new (std::nothrow) WebServer(HTTP_PORT));
++  if (!server) {
++    LOG_ERR("SPOT", "OOM: WebServer");
++    return false;
++  }
++
++  server->on("/", HTTP_GET, [this] { handleRoot(); });
++  server->on("/api/spotify/config", HTTP_GET, [this] { handleGetConfig(); });
++  server->on("/api/spotify/config", HTTP_POST, [this] { handlePostConfig(); });
++  server->on("/spotify/login", HTTP_GET, [this] { handleLogin(); });
++  server->on("/spotify/callback", HTTP_GET, [this] { handleCallback(); });
++  server->onNotFound([this] { server->send(404, "text/plain", "Not found"); });
++
++  server->begin();
++  running = true;
++  linkResult = LinkResult::NONE;
++  LOG_INF("SPOT", "Spotify auth server on %s", getBaseUrl().c_str());
++  return true;
++}
++
++void SpotifyAuthServer::stop() {
++  if (!running) return;
++  server->stop();
++  server.reset();
++  running = false;
++  codeVerifier.clear();
++  csrf.clear();
++}
++
++void SpotifyAuthServer::handleClient() {
++  if (running) server->handleClient();
++}
++
++bool SpotifyAuthServer::consumeConfigChanged() {
++  const bool changed = configChanged;
++  configChanged = false;
++  return changed;
++}
++
++std::string SpotifyAuthServer::getBaseUrl() const {
++  return std::string("http://") + WiFi.localIP().toString().c_str() + "/";
++}
++
++void SpotifyAuthServer::handleRoot() const {
++  server->sendHeader("Content-Encoding", "gzip");
++  server->send_P(200, "text/html", SpotifySetupPageHtml, sizeof(SpotifySetupPageHtml));
++}
++
++void SpotifyAuthServer::handleGetConfig() const {
++  JsonDocument doc;
++  doc["client_id"] = SPOTIFY_STORE.getClientId();
++  doc["redirect_uri"] = SPOTIFY_STORE.getRedirectUri();
++  doc["linked"] = SPOTIFY_STORE.isLinked();
++  doc["device_ip"] = WiFi.localIP().toString();
++  std::string body;
++  serializeJson(doc, body);
++  server->send(200, "application/json", body.c_str());
++}
++
++void SpotifyAuthServer::handlePostConfig() {
++  if (!server->hasArg("plain")) {
++    server->send(400, "text/plain", "Missing JSON body");
++    return;
++  }
++
++  JsonDocument doc;
++  if (deserializeJson(doc, server->arg("plain"))) {
++    server->send(400, "text/plain", "Invalid JSON");
++    return;
++  }
++
++  const char* clientId = doc["client_id"] | "";
++  const char* redirectUri = doc["redirect_uri"] | "";
++  if (clientId[0] == '\0') {
++    server->send(400, "text/plain", "client_id is required");
++    return;
++  }
++
++  SPOTIFY_STORE.setConfig(clientId, redirectUri);
++  if (doc["unlink"] | false) {
++    SPOTIFY_STORE.clearLink();
++    SpotifyClient::resetSession();
++  }
++  SPOTIFY_STORE.saveToFile();
++  configChanged = true;
++  server->send(200, "application/json", "{\"ok\":true}");
++}
++
++void SpotifyAuthServer::handleLogin() {
++  if (!SPOTIFY_STORE.hasClientId()) {
++    server->send(400, "text/plain", "Set the client ID on the setup page first");
++    return;
++  }
++
++  std::string challenge;
++  if (!SpotifyClient::generatePkce(codeVerifier, challenge)) {
++    server->send(500, "text/plain", "PKCE generation failed");
++    return;
++  }
++  csrf = SpotifyClient::generateCsrfToken();
++
++  // Default the redirect URI to this device's own callback when unset.
++  std::string redirectUri = SPOTIFY_STORE.getRedirectUri();
++  if (redirectUri.empty()) {
++    redirectUri = getBaseUrl() + "spotify/callback";
++    SPOTIFY_STORE.setConfig(SPOTIFY_STORE.getClientId(), redirectUri);
++    SPOTIFY_STORE.saveToFile();
++  }
++
++  const std::string state = SpotifyAuthUtils::buildState(csrf, WiFi.localIP().toString().c_str());
++  const std::string url =
++      SpotifyAuthUtils::buildAuthorizeUrl(SPOTIFY_STORE.getClientId(), redirectUri, challenge, state);
++
++  server->sendHeader("Location", url.c_str());
++  server->send(302, "text/plain", "");
++}
++
++void SpotifyAuthServer::handleCallback() {
++  char failReason[64] = "Unknown error";
++
++  if (server->hasArg("error")) {
++    snprintf(failReason, sizeof(failReason), "Spotify said: %s", server->arg("error").c_str());
++  } else if (!server->hasArg("code") || codeVerifier.empty()) {
++    snprintf(failReason, sizeof(failReason), "Missing authorization code");
++  } else if (!SpotifyAuthUtils::stateMatches(server->arg("state").c_str(), csrf)) {
++    snprintf(failReason, sizeof(failReason), "State mismatch - start again from the device");
++  } else {
++    // Blocking TLS exchange (~2-4s); the phone browser waits for the result.
++    const SpotifyClient::Error err = SpotifyClient::exchangeCode(server->arg("code").c_str(), codeVerifier);
++    codeVerifier.clear();
++    csrf.clear();
++    if (err == SpotifyClient::OK) {
++      linkResult = LinkResult::SUCCESS;
++      server->send(200, "text/html", LINKED_PAGE);
++      LOG_INF("SPOT", "Spotify account linked");
++      return;
++    }
++    snprintf(failReason, sizeof(failReason), "%s (HTTP %d)", SpotifyClient::errorString(err),
++             SpotifyClient::lastHttpCode);
++  }
++
++  linkResult = LinkResult::FAILED;
++  LOG_ERR("SPOT", "Spotify link failed: %s", failReason);
++  std::string page = std::string(FAILED_PAGE_PREFIX) + failReason + FAILED_PAGE_SUFFIX;
++  server->send(400, "text/html", page.c_str());
++}
+diff --git a/src/network/SpotifyAuthServer.h b/src/network/SpotifyAuthServer.h
+new file mode 100644
+index 0000000..42bd432
+--- /dev/null
++++ b/src/network/SpotifyAuthServer.h
+@@ -0,0 +1,60 @@
++#pragma once
++#include <memory>
++#include <string>
++
++class WebServer;
++
++/**
++ * Minimal HTTP server for the one-time Spotify setup + OAuth PKCE link flow.
++ *
++ * Owned and pumped (handleClient) by SpotifyActivity while it is in the
++ * setup/link states, then stopped — it is intentionally NOT part of
++ * CrossPointWebServer so the Spotify mode never pays for the file-transfer
++ * server (websockets, upload buffers) and vice versa.
++ *
++ * Routes:
++ *   GET  /                    setup page (client ID + redirect URI form)
++ *   GET  /api/spotify/config  current config as JSON
++ *   POST /api/spotify/config  save config (JSON body)
++ *   GET  /spotify/login       generates PKCE + state, 302 to Spotify authorize
++ *   GET  /spotify/callback    OAuth redirect target: exchanges code for tokens
++ *
++ * The callback URL can be reached either directly (redirect URI set to
++ * http://<device-ip>/spotify/callback, where Spotify permits it) or via an
++ * HTTPS bridge page that forwards the code to the device IP carried in the
++ * OAuth state parameter (see docs/spotify.md).
++ */
++class SpotifyAuthServer {
++ public:
++  enum class LinkResult { NONE, SUCCESS, FAILED };
++
++  SpotifyAuthServer();
++  ~SpotifyAuthServer();
++
++  // Requires WiFi STA to be connected. Returns false otherwise.
++  bool begin();
++  void stop();
++  void handleClient();
++  bool isRunning() const { return running; }
++
++  LinkResult getLinkResult() const { return linkResult; }
++  // True when a config save happened since the last call (UI refresh hint).
++  bool consumeConfigChanged();
++
++  // e.g. "http://192.168.1.42/" - QR payload for the setup screen.
++  std::string getBaseUrl() const;
++
++ private:
++  void handleRoot() const;
++  void handleGetConfig() const;
++  void handlePostConfig();
++  void handleLogin();
++  void handleCallback();
++
++  std::unique_ptr<WebServer> server;
++  std::string codeVerifier;
++  std::string csrf;
++  LinkResult linkResult = LinkResult::NONE;
++  bool configChanged = false;
++  bool running = false;
++};
+diff --git a/src/network/html/SpotifySetupPage.html b/src/network/html/SpotifySetupPage.html
+new file mode 100644
+index 0000000..e1165b7
+--- /dev/null
++++ b/src/network/html/SpotifySetupPage.html
+@@ -0,0 +1,87 @@
++<!DOCTYPE html>
++<html lang="en">
++<head>
++<meta charset="utf-8">
++<meta name="viewport" content="width=device-width, initial-scale=1">
++<title>CrossPoint - Spotify Setup</title>
++<style>
++  body { font-family: -apple-system, system-ui, sans-serif; margin: 0; background: #f4f4f4; color: #222; }
++  .wrap { max-width: 480px; margin: 0 auto; padding: 16px; }
++  h1 { font-size: 1.3em; }
++  .card { background: #fff; border-radius: 10px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.12); }
++  label { display: block; font-weight: 600; margin: 12px 0 4px; font-size: .9em; }
++  input { width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 1em; }
++  button { width: 100%; padding: 12px; margin-top: 16px; border: 0; border-radius: 6px; font-size: 1em; font-weight: 600; cursor: pointer; }
++  .primary { background: #1db954; color: #fff; }
++  .secondary { background: #e0e0e0; color: #222; }
++  .hint { font-size: .82em; color: #666; margin-top: 4px; }
++  .status { padding: 10px; border-radius: 6px; margin-bottom: 12px; font-size: .9em; display: none; }
++  .ok { background: #e6f7ec; color: #14602f; display: block; }
++  .err { background: #fdecea; color: #8a1c12; display: block; }
++  code { background: #eee; padding: 1px 5px; border-radius: 4px; word-break: break-all; }
++  ol { padding-left: 20px; font-size: .9em; }
++</style>
++</head>
++<body>
++<div class="wrap">
++  <h1>Spotify Setup</h1>
++
++  <div class="card">
++    <div id="status" class="status"></div>
++    <ol>
++      <li>Create a free app at <b>developer.spotify.com/dashboard</b>.</li>
++      <li>Add a <b>Redirect URI</b> to that app and paste the same value below.
++        <div class="hint">Simplest: <code id="deviceCb">http://&lt;device-ip&gt;/spotify/callback</code>.
++        If Spotify refuses a plain http LAN address, host the bridge page from
++        <code>docs/spotify-redirect.html</code> on any HTTPS site (e.g. GitHub Pages) and use its URL instead.</div>
++      </li>
++      <li>Paste the app's <b>Client ID</b> below, save, then connect.</li>
++    </ol>
++    <label for="clientId">Client ID</label>
++    <input id="clientId" placeholder="32-character Spotify client ID" autocomplete="off">
++    <label for="redirectUri">Redirect URI</label>
++    <input id="redirectUri" placeholder="Leave empty to use this device's callback URL" autocomplete="off">
++    <button class="secondary" onclick="save(false)">Save</button>
++    <button class="primary" onclick="connect()">Save &amp; Connect Spotify</button>
++    <button class="secondary" id="unlinkBtn" style="display:none" onclick="save(true)">Unlink account</button>
++  </div>
++</div>
++<script>
++function show(msg, isErr) {
++  var el = document.getElementById('status');
++  el.textContent = msg;
++  el.className = 'status ' + (isErr ? 'err' : 'ok');
++}
++function load() {
++  fetch('/api/spotify/config').then(function(r){ return r.json(); }).then(function(cfg){
++    document.getElementById('clientId').value = cfg.client_id || '';
++    document.getElementById('redirectUri').value = cfg.redirect_uri || '';
++    document.getElementById('deviceCb').textContent = 'http://' + cfg.device_ip + '/spotify/callback';
++    if (cfg.linked) {
++      show('Account linked. Saving a new config keeps the link; use Unlink to drop it.', false);
++      document.getElementById('unlinkBtn').style.display = 'block';
++    }
++  }).catch(function(){ show('Could not load current config', true); });
++}
++function save(unlink) {
++  var body = {
++    client_id: document.getElementById('clientId').value.trim(),
++    redirect_uri: document.getElementById('redirectUri').value.trim()
++  };
++  if (unlink) body.unlink = true;
++  return fetch('/api/spotify/config', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) })
++    .then(function(r){
++      if (!r.ok) return r.text().then(function(t){ throw new Error(t); });
++      show(unlink ? 'Account unlinked' : 'Saved', false);
++      if (unlink) document.getElementById('unlinkBtn').style.display = 'none';
++      return true;
++    })
++    .catch(function(e){ show('Save failed: ' + e.message, true); return false; });
++}
++function connect() {
++  save(false).then(function(ok){ if (ok) location.href = '/spotify/login'; });
++}
++load();
++</script>
++</body>
++</html>
+diff --git a/test/CMakeLists.txt b/test/CMakeLists.txt
+index 17c4664..7be2f05 100644
+--- a/test/CMakeLists.txt
++++ b/test/CMakeLists.txt
+@@ -38,6 +38,8 @@ target_compile_options(crosspoint_test_common INTERFACE
+ enable_testing()
+ include(GoogleTest)
+ 
++add_subdirectory(spotify_auth)
++add_subdirectory(spotify_parser)
+ add_subdirectory(streaming_json_parser)
+ add_subdirectory(release_json_parser)
+ add_subdirectory(differential_rounding)
+diff --git a/test/spotify_auth/CMakeLists.txt b/test/spotify_auth/CMakeLists.txt
+new file mode 100644
+index 0000000..10663cb
+--- /dev/null
++++ b/test/spotify_auth/CMakeLists.txt
+@@ -0,0 +1,15 @@
++add_executable(SpotifyAuthUtilsTest
++  SpotifyAuthUtilsTest.cpp
++  ${REPO_ROOT}/lib/Spotify/SpotifyAuthUtils.cpp
++)
++
++target_include_directories(SpotifyAuthUtilsTest PRIVATE
++  ${REPO_ROOT}/lib/Spotify
++)
++
++target_link_libraries(SpotifyAuthUtilsTest PRIVATE
++  crosspoint_test_common
++  GTest::gtest_main
++)
++
++gtest_discover_tests(SpotifyAuthUtilsTest)
+diff --git a/test/spotify_auth/SpotifyAuthUtilsTest.cpp b/test/spotify_auth/SpotifyAuthUtilsTest.cpp
+new file mode 100644
+index 0000000..42de1cc
+--- /dev/null
++++ b/test/spotify_auth/SpotifyAuthUtilsTest.cpp
+@@ -0,0 +1,80 @@
++#include <gtest/gtest.h>
++
++#include <cstdint>
++#include <string>
++
++#include "lib/Spotify/SpotifyAuthUtils.h"
++
++namespace {
++
++using namespace SpotifyAuthUtils;
++
++// RFC 4648 test vectors, adjusted for the url-safe alphabet and no padding.
++TEST(Base64UrlEncode, Rfc4648Vectors) {
++  const auto enc = [](const std::string& s) {
++    return base64UrlEncode(reinterpret_cast<const uint8_t*>(s.data()), s.size());
++  };
++  EXPECT_EQ(enc(""), "");
++  EXPECT_EQ(enc("f"), "Zg");
++  EXPECT_EQ(enc("fo"), "Zm8");
++  EXPECT_EQ(enc("foo"), "Zm9v");
++  EXPECT_EQ(enc("foob"), "Zm9vYg");
++  EXPECT_EQ(enc("fooba"), "Zm9vYmE");
++  EXPECT_EQ(enc("foobar"), "Zm9vYmFy");
++}
++
++TEST(Base64UrlEncode, UsesUrlSafeAlphabet) {
++  // 0xFB 0xEF 0xFF encodes to "++//" in standard base64, "--__" in base64url.
++  const uint8_t data[] = {0xFB, 0xEF, 0xFF};
++  EXPECT_EQ(base64UrlEncode(data, sizeof(data)), "--__");
++}
++
++// The PKCE S256 example from RFC 7636 appendix B: the SHA-256 of the sample
++// verifier must encode to this exact challenge. We can't run SHA-256 here
++// (device-side mbedTLS), but we can verify the encoding half with the
++// appendix's raw digest bytes.
++TEST(Base64UrlEncode, Rfc7636AppendixB) {
++  const uint8_t digest[32] = {19,  211, 30,  150, 26,  26,  216, 236, 47,  22,  177, 12, 76,  152, 46,  8,
++                              118, 168, 120, 173, 109, 241, 68,  86,  110, 225, 137, 74, 203, 112, 249, 195};
++  EXPECT_EQ(base64UrlEncode(digest, sizeof(digest)), "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
++}
++
++TEST(UrlEncode, EncodesReservedCharacters) {
++  EXPECT_EQ(urlEncode("abc-XYZ_0.9~"), "abc-XYZ_0.9~");
++  EXPECT_EQ(urlEncode("a b&c=d"), "a%20b%26c%3Dd");
++  EXPECT_EQ(urlEncode("http://192.168.1.2/spotify/callback"), "http%3A%2F%2F192.168.1.2%2Fspotify%2Fcallback");
++}
++
++TEST(State, BuildAndMatch) {
++  const std::string state = buildState("deadbeef01234567", "192.168.1.42");
++  EXPECT_EQ(state, "deadbeef01234567~192.168.1.42");
++
++  EXPECT_TRUE(stateMatches(state, "deadbeef01234567"));
++  EXPECT_TRUE(stateMatches("deadbeef01234567", "deadbeef01234567"));  // no bridge suffix
++  EXPECT_FALSE(stateMatches(state, "othertoken000000"));
++  EXPECT_FALSE(stateMatches("deadbeef0123456", "deadbeef01234567"));        // truncated
++  EXPECT_FALSE(stateMatches("deadbeef01234567extra", "deadbeef01234567"));  // wrong separator
++  EXPECT_FALSE(stateMatches(state, ""));
++}
++
++TEST(AuthorizeUrl, ContainsAllPkceParams) {
++  const std::string url =
++      buildAuthorizeUrl("myclientid", "http://192.168.1.2/spotify/callback", "chall-enge_123", "csrf~192.168.1.2");
++
++  EXPECT_EQ(url.rfind("https://accounts.spotify.com/authorize?response_type=code", 0), 0u);
++  EXPECT_NE(url.find("&client_id=myclientid"), std::string::npos);
++  EXPECT_NE(url.find("&redirect_uri=http%3A%2F%2F192.168.1.2%2Fspotify%2Fcallback"), std::string::npos);
++  EXPECT_NE(url.find("&code_challenge_method=S256"), std::string::npos);
++  EXPECT_NE(url.find("&code_challenge=chall-enge_123"), std::string::npos);
++  EXPECT_NE(url.find("&state=csrf~192.168.1.2"), std::string::npos);  // '~' is RFC 3986 unreserved
++  EXPECT_NE(url.find("&scope=user-read-currently-playing%20user-read-playback-state"), std::string::npos);
++}
++
++TEST(TokenBodies, ExchangeAndRefresh) {
++  EXPECT_EQ(buildTokenExchangeBody("th code", "http://x/cb", "cid", "verifier123"),
++            "grant_type=authorization_code&code=th%20code&redirect_uri=http%3A%2F%2Fx%2Fcb&client_id=cid"
++            "&code_verifier=verifier123");
++  EXPECT_EQ(buildRefreshBody("tok/en", "cid"), "grant_type=refresh_token&refresh_token=tok%2Fen&client_id=cid");
++}
++
++}  // namespace
+diff --git a/test/spotify_parser/CMakeLists.txt b/test/spotify_parser/CMakeLists.txt
+new file mode 100644
+index 0000000..12dab7c
+--- /dev/null
++++ b/test/spotify_parser/CMakeLists.txt
+@@ -0,0 +1,24 @@
++# The parser uses ArduinoJson, which is header-only and host-portable.
++FetchContent_Declare(
++  arduinojson
++  GIT_REPOSITORY https://github.com/bblanchon/ArduinoJson.git
++  GIT_TAG v7.4.2
++)
++FetchContent_MakeAvailable(arduinojson)
++
++add_executable(SpotifyNowPlayingParserTest
++  SpotifyNowPlayingParserTest.cpp
++  ${REPO_ROOT}/lib/Spotify/SpotifyNowPlayingParser.cpp
++)
++
++target_include_directories(SpotifyNowPlayingParserTest PRIVATE
++  ${REPO_ROOT}/lib/Spotify
++)
++
++target_link_libraries(SpotifyNowPlayingParserTest PRIVATE
++  crosspoint_test_common
++  ArduinoJson
++  GTest::gtest_main
++)
++
++gtest_discover_tests(SpotifyNowPlayingParserTest)
+diff --git a/test/spotify_parser/SpotifyNowPlayingParserTest.cpp b/test/spotify_parser/SpotifyNowPlayingParserTest.cpp
+new file mode 100644
+index 0000000..a791fb1
+--- /dev/null
++++ b/test/spotify_parser/SpotifyNowPlayingParserTest.cpp
+@@ -0,0 +1,90 @@
++#include <gtest/gtest.h>
++
++#include <string>
++
++#include "lib/Spotify/SpotifyNowPlayingParser.h"
++
++namespace {
++
++// Trimmed but structurally faithful currently-playing response.
++constexpr char PLAYING_JSON[] = R"({
++  "timestamp": 1720000000000,
++  "context": {"type": "album", "href": "https://api.spotify.com/v1/albums/x"},
++  "progress_ms": 83500,
++  "item": {
++    "id": "11dFghVXANMlKmJXsNCbNl",
++    "name": "Cut To The Feeling",
++    "duration_ms": 207959,
++    "type": "track",
++    "artists": [
++      {"id": "a1", "name": "Carly Rae Jepsen"},
++      {"id": "a2", "name": "Second Artist"}
++    ],
++    "album": {
++      "id": "0tGPJ0bkWOUmH7MEOR77qc",
++      "name": "Cut To The Feeling",
++      "images": [
++        {"url": "https://i.scdn.co/image/640", "width": 640, "height": 640},
++        {"url": "https://i.scdn.co/image/300", "width": 300, "height": 300},
++        {"url": "https://i.scdn.co/image/64", "width": 64, "height": 64}
++      ]
++    }
++  },
++  "currently_playing_type": "track",
++  "is_playing": true
++})";
++
++TEST(NowPlayingParser, ParsesTrackFields) {
++  SpotifyNowPlaying np;
++  ASSERT_TRUE(SpotifyNowPlayingParser::parse(PLAYING_JSON, np));
++
++  EXPECT_TRUE(np.isPlaying);
++  EXPECT_EQ(np.trackId, "11dFghVXANMlKmJXsNCbNl");
++  EXPECT_EQ(np.title, "Cut To The Feeling");
++  EXPECT_EQ(np.artists, "Carly Rae Jepsen, Second Artist");
++  EXPECT_EQ(np.albumId, "0tGPJ0bkWOUmH7MEOR77qc");
++  EXPECT_EQ(np.progressMs, 83500u);
++  EXPECT_EQ(np.durationMs, 207959u);
++}
++
++TEST(NowPlayingParser, PicksSmallestImageOfAtLeast300px) {
++  SpotifyNowPlaying np;
++  ASSERT_TRUE(SpotifyNowPlayingParser::parse(PLAYING_JSON, np));
++  EXPECT_EQ(np.artUrl, "https://i.scdn.co/image/300");
++}
++
++TEST(NowPlayingParser, FallsBackToLargestWhenAllSmall) {
++  const std::string json = R"({
++    "is_playing": false, "progress_ms": 1,
++    "item": {"id": "t", "name": "n", "duration_ms": 2,
++      "artists": [{"name": "a"}],
++      "album": {"id": "al", "images": [
++        {"url": "u64", "width": 64}, {"url": "u128", "width": 128}]}}})";
++  SpotifyNowPlaying np;
++  ASSERT_TRUE(SpotifyNowPlayingParser::parse(json.c_str(), np));
++  EXPECT_EQ(np.artUrl, "u128");
++  EXPECT_FALSE(np.isPlaying);
++}
++
++TEST(NowPlayingParser, RejectsMissingItem) {
++  SpotifyNowPlaying np;
++  // Ad break / private session: 200 with no usable item.
++  EXPECT_FALSE(SpotifyNowPlayingParser::parse(R"({"is_playing": true, "item": null})", np));
++  EXPECT_FALSE(SpotifyNowPlayingParser::parse("", np));
++  EXPECT_FALSE(SpotifyNowPlayingParser::parse(nullptr, np));
++  EXPECT_FALSE(SpotifyNowPlayingParser::parse("not json", np));
++}
++
++TEST(NowPlayingParser, ToleratesMissingImagesAndArtists) {
++  const std::string json = R"({
++    "is_playing": true, "progress_ms": 5,
++    "item": {"id": "t2", "name": "Song", "duration_ms": 9,
++      "album": {"id": "al2"}}})";
++  SpotifyNowPlaying np;
++  ASSERT_TRUE(SpotifyNowPlayingParser::parse(json.c_str(), np));
++  EXPECT_EQ(np.artUrl, "");
++  EXPECT_EQ(np.artists, "");
++  EXPECT_EQ(np.trackId, "t2");
++}
++
++}  // namespace
+-- 
+2.43.0
+
