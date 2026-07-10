@@ -15,8 +15,8 @@ host unit tests (all passing). Full docs are inside the patch at
 `docs/spotify.md`.
 
 - Base commit: `4b34a57` (crosspoint-reader `develop`, July 2026)
-- Patch commit: `feat: add Spotify Now Playing mode with album artwork`
-- 25 files, +1795 lines
+- Patch commits: `feat: add Spotify Now Playing mode with album artwork` + `feat: desktop simulator support + fixes found by running the mode`
+- 41 files, ~1950 lines; includes a desktop-simulator env (pio run -e simulator) with mock-API demo fixtures
 
 ## How to apply
 

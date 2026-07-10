@@ -1,7 +1,7 @@
 From 92f8fc631aa2b6fdc59ad5a7db2194f2e3fc8826 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 10 Jul 2026 17:47:17 +0000
-Subject: [PATCH] feat: add Spotify Now Playing mode with album artwork
+Subject: [PATCH 1/2] feat: add Spotify Now Playing mode with album artwork
 
 New home-menu activity that shows dithered album art, track/artist and a
 progress bar for the user's current Spotify playback (Web API observer
@@ -2101,6 +2101,534 @@ index 0000000..a791fb1
 +}
 +
 +}  // namespace
+-- 
+2.43.0
+
+
+From ab7ce09385ef93bde958a975f7fcaaae7df56359 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 10 Jul 2026 19:08:50 +0000
+Subject: [PATCH 2/2] feat: desktop simulator support + fixes found by running
+ the mode
+
+Ran the Spotify mode end-to-end in the crosspoint-simulator (native SDL2
+build) and fixed everything it surfaced:
+
+- platformio.ini: add [env:simulator] per the simulator's Linux sample,
+  plus -Isim_support/include for an esp_random.h shim the simulator does
+  not ship yet
+- SpotifyActivity.h: include SpotifyAuthServer.h instead of a forward
+  declaration - unique_ptr member destruction in other TUs (and the
+  ctor unwind path) needs the complete type; caught at native compile,
+  would also have broken the device build
+- SpotifyAuthServer: deserializeJson needs an lvalue String body (same
+  pattern as CrossPointWebServer)
+- SpotifyClient: use the mbedtls_sha256 context API - the common subset
+  between device mbedTLS and the simulator shim
+- SpotifyStore: accept a plaintext refresh_token with obfuscated resave
+  (mirrors PersistableStoreBase::extractPassword), enabling seeded sim
+  demos and hand-recovery
+- Now Playing: draw the progress bar directly - GUI.drawProgressBar
+  appends a percentage label that collided with the time readout
+- home menu: proper 32x32 music-note icon (new UIIcon::Music, mapped in
+  LyraTheme) instead of the icon-less entry
+- sim_support/spotify-demo/: mock API fixtures + sample art for
+  CROSSPOINT_SIM_HTTP_MOCK_ROOT demos; docs/spotify.md documents the
+  simulator workflow
+
+Verified: pio run -e simulator builds clean; driven headlessly under
+Xvfb through home -> WiFi -> now-playing/paused/nothing-playing/link
+screens; all 97 host tests pass.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017CwTd5jjLANup3CKUBJ1BS
+---
+ .gitignore                                 |   3 ++
+ docs/spotify.md                            |  13 ++++++
+ lib/Spotify/SpotifyClient.cpp              |  11 ++++-
+ lib/Spotify/SpotifyStore.cpp               |  11 +++++
+ platformio.ini                             |  48 +++++++++++++++++++++
+ sim_support/include/esp_random.h           |  20 +++++++++
+ sim_support/spotify-demo/albumart.jpg      | Bin 0 -> 7803 bytes
+ sim_support/spotify-demo/currently-playing |   1 +
+ sim_support/spotify-demo/token             |   1 +
+ src/activities/home/HomeActivity.cpp       |   2 +-
+ src/activities/network/SpotifyActivity.cpp |  10 ++++-
+ src/activities/network/SpotifyActivity.h   |   3 +-
+ src/components/icons/music.h               |  12 ++++++
+ src/components/themes/BaseTheme.h          |  17 +++++++-
+ src/components/themes/lyra/LyraTheme.cpp   |   3 ++
+ src/network/SpotifyAuthServer.cpp          |   3 +-
+ 16 files changed, 150 insertions(+), 8 deletions(-)
+ create mode 100644 sim_support/include/esp_random.h
+ create mode 100644 sim_support/spotify-demo/albumart.jpg
+ create mode 100644 sim_support/spotify-demo/currently-playing
+ create mode 100644 sim_support/spotify-demo/token
+ create mode 100644 src/components/icons/music.h
+
+diff --git a/.gitignore b/.gitignore
+index 6bd1253..661a5a8 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -23,3 +23,6 @@ lib/EpdFont/scripts/output/
+ # (worktrees, scheduled-task locks, settings.local, scout CLEANUP.md) out.
+ .claude/*
+ !.claude/skills/
++
++# Simulator SD-card root (crosspoint-simulator runtime data)
++fs_/
+diff --git a/docs/spotify.md b/docs/spotify.md
+index 25051b0..6dbe747 100644
+--- a/docs/spotify.md
++++ b/docs/spotify.md
+@@ -50,6 +50,19 @@ just needs WiFi. Scopes requested: `user-read-currently-playing`,
+ - To unlink the account: open the setup page (QR shown when the link is
+   broken, or re-run setup) and use **Unlink account**.
+ 
++## Trying it in the simulator
++
++The mode runs in the [desktop simulator](https://github.com/uxjulia/crosspoint-simulator)
++(`pio run -e simulator -t run_simulator`; the `[env:simulator]` section is in
++`platformio.ini`). To demo without a Spotify account, point
++`CROSSPOINT_SIM_HTTP_MOCK_ROOT` at `sim_support/spotify-demo/` (canned token +
++currently-playing responses and a sample album JPEG) and seed
++`fs_/.crosspoint/spotify.json` with
++`{"client_id":"sim-demo-client-id","refresh_token":"sim-demo-refresh-token"}` —
++the store accepts a plaintext `refresh_token` and resaves it obfuscated.
++Note: the simulator's QR library is a stub, so QR screens show the fallback
++URL text; real QR codes render on hardware.
++
+ ## Implementation notes
+ 
+ - `lib/Spotify/` — PKCE helpers (`SpotifyAuthUtils`, host-tested), the Web
+diff --git a/lib/Spotify/SpotifyClient.cpp b/lib/Spotify/SpotifyClient.cpp
+index 96999ba..100baf9 100644
+--- a/lib/Spotify/SpotifyClient.cpp
++++ b/lib/Spotify/SpotifyClient.cpp
+@@ -94,8 +94,17 @@ bool SpotifyClient::generatePkce(std::string& outVerifier, std::string& outChall
+   esp_fill_random(random, sizeof(random));
+   outVerifier = SpotifyAuthUtils::base64UrlEncode(random, sizeof(random));
+ 
++  // Context API rather than the one-shot mbedtls_sha256(): it is the common
++  // subset between device mbedTLS and the simulator's shim.
+   uint8_t digest[32];
+-  if (mbedtls_sha256(reinterpret_cast<const unsigned char*>(outVerifier.c_str()), outVerifier.size(), digest, 0) != 0) {
++  mbedtls_sha256_context ctx;
++  mbedtls_sha256_init(&ctx);
++  const bool ok = mbedtls_sha256_starts(&ctx, 0) == 0 &&
++                  mbedtls_sha256_update(&ctx, reinterpret_cast<const unsigned char*>(outVerifier.c_str()),
++                                        outVerifier.size()) == 0 &&
++                  mbedtls_sha256_finish(&ctx, digest) == 0;
++  mbedtls_sha256_free(&ctx);
++  if (!ok) {
+     LOG_ERR("SPOT", "SHA-256 for PKCE challenge failed");
+     return false;
+   }
+diff --git a/lib/Spotify/SpotifyStore.cpp b/lib/Spotify/SpotifyStore.cpp
+index 6b03cef..c924c25 100644
+--- a/lib/Spotify/SpotifyStore.cpp
++++ b/lib/Spotify/SpotifyStore.cpp
+@@ -19,6 +19,17 @@ bool SpotifyStore::fromJson(JsonVariantConst doc) {
+     refreshToken.clear();
+   }
+ 
++  // Plaintext fallback (hand-edited or seeded files), resaved obfuscated —
++  // same behavior as PersistableStoreBase::extractPassword for other stores.
++  if (refreshToken.empty()) {
++    const char* plain = doc["refresh_token"] | "";
++    if (plain[0] != '\0') {
++      refreshToken = plain;
++      LOG_DBG("SPOT", "Resaving Spotify store with obfuscated token");
++      saveToFile();
++    }
++  }
++
+   return true;
+ }
+ 
+diff --git a/platformio.ini b/platformio.ini
+index 03a2ece..7bdb208 100644
+--- a/platformio.ini
++++ b/platformio.ini
+@@ -105,3 +105,51 @@ build_flags =
+   -DCROSSPOINT_VERSION=\"${crosspoint.version}-slim\"
+   ; serial output is disabled in slim builds to save space
+   -UENABLE_SERIAL_LOG
++
++; Desktop simulator (https://github.com/uxjulia/crosspoint-simulator).
++; Native build, SDL2 window, host-curl networking; run with:
++;   pio run -e simulator -t run_simulator
++; Section follows the simulator's sample-platformio-linux-wsl.ini, plus
++; -Isim_support/include for shims the simulator does not ship yet
++; (esp_random.h, OpenSSL-backed mbedtls/sha256.h for real PKCE digests).
++[env:simulator]
++platform = native
++build_src_filter =
++  +<*>
++  ; The simulator library supplies host-backed equivalents or safe no-op shims.
++  -<network/CrossPointWebServer.cpp>
++  -<network/FirmwareFlasher.cpp>
++  -<network/OtaBootSwitch.cpp>
++  -<network/OtaUpdater.cpp>
++  -<platform/skip_efuse_blk_check.c>
++build_flags =
++  -std=gnu++2a
++  !sdl2-config --cflags --libs
++  -lssl
++  -lcrypto
++  -Wno-deprecated-declarations
++  -Wno-narrowing
++  -DSIMULATOR
++  -DCROSSPOINT_VERSION=\"dev-simulator\"
++  -DENABLE_SERIAL_LOG
++  -DLOG_LEVEL=2
++  -DEINK_DISPLAY_SINGLE_BUFFER_MODE=1
++  -DMINIZ_NO_ZLIB_COMPATIBLE_NAMES=1
++  -DXML_GE=0
++  -DXML_CONTEXT_BYTES=1024
++  -DUSE_UTF8_LONG_NAMES=1
++  -DPNG_MAX_BUFFERED_PIXELS=16416
++  -DDISABLE_FS_H_WARNING=1
++  -DDESTRUCTOR_CLOSES_FILE=1
++  -Isrc
++  -Isim_support/include
++lib_ignore = hal, PNGdec, JPEGDEC
++extra_scripts =
++  pre:scripts/gen_i18n.py
++  pre:scripts/git_branch.py
++  pre:scripts/build_html.py
++lib_deps =
++  simulator=https://github.com/uxjulia/crosspoint-simulator
++  bblanchon/ArduinoJson @ 7.4.2
++  ricmoo/QRCode @ ^0.0.1
++  links2004/WebSockets @ 2.7.3
+diff --git a/sim_support/include/esp_random.h b/sim_support/include/esp_random.h
+new file mode 100644
+index 0000000..658efef
+--- /dev/null
++++ b/sim_support/include/esp_random.h
+@@ -0,0 +1,20 @@
++#pragma once
++// Simulator-only shim for esp_random.h (not yet provided by
++// crosspoint-simulator). Prepended to the include path by [env:simulator]
++// via -Isim_support/include; never used in embedded builds.
++
++#include <cstddef>
++#include <cstdint>
++#include <random>
++
++inline uint32_t esp_random(void) {
++  static std::mt19937 rng{std::random_device{}()};
++  return static_cast<uint32_t>(rng());
++}
++
++inline void esp_fill_random(void* buf, size_t len) {
++  auto* out = static_cast<uint8_t*>(buf);
++  for (size_t i = 0; i < len; i++) {
++    out[i] = static_cast<uint8_t>(esp_random() & 0xFF);
++  }
++}
+diff --git a/sim_support/spotify-demo/albumart.jpg b/sim_support/spotify-demo/albumart.jpg
+new file mode 100644
+index 0000000000000000000000000000000000000000..0d35a30f04c958775d186ad9fecb2675af354d8f
+GIT binary patch
+literal 7803
+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
+Hrz8IdAd^c}
+
+literal 0
+HcmV?d00001
+
+diff --git a/sim_support/spotify-demo/currently-playing b/sim_support/spotify-demo/currently-playing
+new file mode 100644
+index 0000000..9ba6d0c
+--- /dev/null
++++ b/sim_support/spotify-demo/currently-playing
+@@ -0,0 +1 @@
++{"is_playing":false,"item":null}
+\ No newline at end of file
+diff --git a/sim_support/spotify-demo/token b/sim_support/spotify-demo/token
+new file mode 100644
+index 0000000..4255abb
+--- /dev/null
++++ b/sim_support/spotify-demo/token
+@@ -0,0 +1 @@
++{"access_token":"sim-access-token","token_type":"Bearer","expires_in":3600,"scope":"user-read-currently-playing user-read-playback-state"}
+diff --git a/src/activities/home/HomeActivity.cpp b/src/activities/home/HomeActivity.cpp
+index a3f7408..adc47e0 100644
+--- a/src/activities/home/HomeActivity.cpp
++++ b/src/activities/home/HomeActivity.cpp
+@@ -236,7 +236,7 @@ void HomeActivity::render(RenderLock&&) {
+   // Build menu items dynamically
+   std::vector<const char*> menuItems = {tr(STR_BROWSE_FILES), tr(STR_MENU_RECENT_BOOKS), tr(STR_FILE_TRANSFER),
+                                         tr(STR_SPOTIFY), tr(STR_SETTINGS_TITLE)};
+-  std::vector<UIIcon> menuIcons = {Folder, Recent, Transfer, Image, Settings};
++  std::vector<UIIcon> menuIcons = {Folder, Recent, Transfer, Music, Settings};
+ 
+   if (hasOpdsServers) {
+     menuItems.insert(menuItems.begin() + 2, tr(STR_OPDS_BROWSER));
+diff --git a/src/activities/network/SpotifyActivity.cpp b/src/activities/network/SpotifyActivity.cpp
+index 5edb6e1..0fba038 100644
+--- a/src/activities/network/SpotifyActivity.cpp
++++ b/src/activities/network/SpotifyActivity.cpp
+@@ -359,10 +359,16 @@ void SpotifyActivity::renderNowPlaying() {
+     if (nowPlaying.isPlaying) elapsed += millis() - lastFetchMs;
+     if (nowPlaying.durationMs > 0 && elapsed > nowPlaying.durationMs) elapsed = nowPlaying.durationMs;
+ 
++    // Plain bar without the percentage label GUI.drawProgressBar appends.
+     const auto& metrics = UITheme::getInstance().getMetrics();
+     const int barY = textTop + 90;
+-    GUI.drawProgressBar(renderer, Rect{40, barY, pageWidth - 80, metrics.progressBarHeight}, elapsed,
+-                        nowPlaying.durationMs > 0 ? nowPlaying.durationMs : 1);
++    const int barW = pageWidth - 80;
++    const uint32_t total = nowPlaying.durationMs > 0 ? nowPlaying.durationMs : 1;
++    const int fillWidth = static_cast<int>(static_cast<uint64_t>(elapsed) * (barW - 4) / total);
++    renderer.drawRect(40, barY, barW, metrics.progressBarHeight);
++    if (fillWidth > 0) {
++      renderer.fillRect(42, barY + 2, fillWidth, metrics.progressBarHeight - 4);
++    }
+ 
+     char elapsedStr[8];
+     char durationStr[8];
+diff --git a/src/activities/network/SpotifyActivity.h b/src/activities/network/SpotifyActivity.h
+index 464e338..91421f1 100644
+--- a/src/activities/network/SpotifyActivity.h
++++ b/src/activities/network/SpotifyActivity.h
+@@ -6,8 +6,7 @@
+ #include <string>
+ 
+ #include "activities/Activity.h"
+-
+-class SpotifyAuthServer;
++#include "network/SpotifyAuthServer.h"
+ 
+ /**
+  * Spotify "Now Playing" mode: shows dithered album artwork, track/artist and
+diff --git a/src/components/icons/music.h b/src/components/icons/music.h
+new file mode 100644
+index 0000000..b629958
+--- /dev/null
++++ b/src/components/icons/music.h
+@@ -0,0 +1,12 @@
++#pragma once
++#include <cstdint>
++
++// size: 32x32
++static const uint8_t MusicIcon[] = {
++    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
++    0xFF, 0xFF, 0xFF, 0xFE, 0x0F, 0xFF, 0xFF, 0x00, 0x0F, 0xFF, 0xF0, 0x00, 0x0F, 0xFF, 0xF0, 0x00, 0x0F, 0xFF, 0xF0,
++    0x01, 0xCF, 0xFF, 0xF0, 0xFF, 0xCF, 0xFF, 0xF3, 0xFF, 0xCF, 0xFF, 0xF3, 0xFF, 0xCF, 0xFF, 0xF3, 0xFF, 0xCF, 0xFF,
++    0xF3, 0xFF, 0xCF, 0xFF, 0xF3, 0xFF, 0xCF, 0xFF, 0xF3, 0xFF, 0xCF, 0xFF, 0xF3, 0xFF, 0xCF, 0xFF, 0xF3, 0xFF, 0xCF,
++    0xFF, 0xF3, 0xFF, 0xCF, 0xFF, 0xF3, 0xF8, 0x0F, 0xFF, 0xF3, 0xF0, 0x0F, 0xFE, 0x03, 0xE0, 0x0F, 0xFC, 0x03, 0xE0,
++    0x0F, 0xF8, 0x03, 0xF0, 0x1F, 0xF8, 0x03, 0xF8, 0x3F, 0xFC, 0x07, 0xFF, 0xFF, 0xFE, 0x0F, 0xFF, 0xFF, 0xFF, 0xFF,
++    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+diff --git a/src/components/themes/BaseTheme.h b/src/components/themes/BaseTheme.h
+index b50bfc6..468625a 100644
+--- a/src/components/themes/BaseTheme.h
++++ b/src/components/themes/BaseTheme.h
+@@ -113,7 +113,22 @@ struct ThemeMetrics {
+   int textFieldLineEndOffset;
+ };
+ 
+-enum UIIcon { None = 0, Folder, Text, Image, Book, File, Recent, Settings, Transfer, Library, Wifi, Hotspot, Bookmark };
++enum UIIcon {
++  None = 0,
++  Folder,
++  Text,
++  Image,
++  Book,
++  File,
++  Recent,
++  Settings,
++  Transfer,
++  Library,
++  Wifi,
++  Hotspot,
++  Bookmark,
++  Music
++};
+ 
+ enum class KeyboardKeyType { Normal, Shift, Mode, Space, Del, Ok, Disabled };
+ 
+diff --git a/src/components/themes/lyra/LyraTheme.cpp b/src/components/themes/lyra/LyraTheme.cpp
+index c5af0a3..3ea1c0a 100644
+--- a/src/components/themes/lyra/LyraTheme.cpp
++++ b/src/components/themes/lyra/LyraTheme.cpp
+@@ -22,6 +22,7 @@
+ #include "components/icons/hotspot.h"
+ #include "components/icons/image24.h"
+ #include "components/icons/library.h"
++#include "components/icons/music.h"
+ #include "components/icons/recent.h"
+ #include "components/icons/settings2.h"
+ #include "components/icons/text24.h"
+@@ -76,6 +77,8 @@ const uint8_t* iconForName(UIIcon icon, int size) {
+         return HotspotIcon;
+       case UIIcon::Bookmark:
+         return BookmarkIcon;
++      case UIIcon::Music:
++        return MusicIcon;
+       default:
+         return nullptr;
+     }
+diff --git a/src/network/SpotifyAuthServer.cpp b/src/network/SpotifyAuthServer.cpp
+index 35be7bb..b5f5f91 100644
+--- a/src/network/SpotifyAuthServer.cpp
++++ b/src/network/SpotifyAuthServer.cpp
+@@ -99,8 +99,9 @@ void SpotifyAuthServer::handlePostConfig() {
+     return;
+   }
+ 
++  const String body = server->arg("plain");
+   JsonDocument doc;
+-  if (deserializeJson(doc, server->arg("plain"))) {
++  if (deserializeJson(doc, body)) {
+     server->send(400, "text/plain", "Invalid JSON");
+     return;
+   }
 -- 
 2.43.0
 
